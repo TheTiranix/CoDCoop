@@ -167,6 +167,21 @@ void FixClientNum(int n)
     if (gameClients) *(int*)(gameClients + n * *(int*)0x152bc68 + 0x9c) = n;
 }
 
+// El script de la mision solo arma a level.player: si un remoto no tiene armas (al entrar o al
+// reaparecer) recibe el mismo equipo que el host. ps: +0xa0 arma actual, +0xf4 ammo[64],
+// +0x1f4 cargador[64], +0x2f4 bits de armas, +0x2fc ranuras[6] (ver giveweapon gamex86 RVA 0x15020).
+void GiveHostLoadout(int n)
+{
+    uint8_t* gameClients = *(uint8_t**)0x152bc64;
+    if (!gameClients) return;
+    uint8_t* host = gameClients;
+    uint8_t* ps = gameClients + n * *(int*)0x152bc68;
+    if (*(int*)(ps + 0xa0) || !*(int*)(host + 0xa0)) return;  // ya tiene un arma en la mano, o el host tampoco
+    if (!*(uint64_t*)(ps + 0x2f4)) memcpy(ps + 0xf4, host + 0xf4, 0x304 - 0xf4);
+    *(int*)(ps + 0xa0) = *(int*)(host + 0xa0);
+    Log("jugador %d: recibe el equipo del host (arma %d)", n, *(int*)(ps + 0xa0));
+}
+
 void HostJoin(const sockaddr_in& from, Reader r)
 {
     int qport = r.Get<int>(), lastIncoming = r.Get<int>(), serverCmdSeq = r.Get<int>(), relSeq = r.Get<int>();
@@ -499,6 +514,7 @@ extern "C" void __cdecl Coop_HostFrame()
         uint8_t* cl = g::Client(n);
         if (*(int*)(cl + g::CL_STATE) != 1) { g_remote[n]->active = false; continue; }
         FixClientNum(n);
+        GiveHostLoadout(n);
         g::SV_SendClientSnapshot(cl);
         ++g_statSnaps;
         SendEntities(n);
