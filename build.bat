@@ -1,9 +1,15 @@
 @echo off
+rem ddraw.dll = cargador fijo (si hay juegos abiertos queda el viejo); codcoop_core.dll = nucleo,
+rem los juegos abiertos lo recargan solos al ver el archivo nuevo.
 cd /d "%~dp0"
 set PATH=D:\Tools\mingw32\mingw32\bin;%PATH%
 if not exist build mkdir build
-g++ -std=c++17 -O2 -shared -static -static-libgcc -static-libstdc++ -o build\ddraw.dll src\main.cpp src\coop.cpp src\ddraw.def -lws2_32 -lwinmm
+set OPT=-std=c++17 -O2 -shared -static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp
+g++ %OPT% -o build\ddraw.dll src\loader.cpp src\ddraw.def
 if errorlevel 1 exit /b 1
-copy /y build\ddraw.dll game\ddraw.dll >nul
-if errorlevel 1 (echo NO SE PUDO COPIAR: el juego esta abierto? & exit /b 1)
+g++ %OPT% -o build\codcoop_core.dll src\core.cpp -lws2_32
+if errorlevel 1 exit /b 1
+copy /y build\codcoop_core.dll game\codcoop_core.dll >nul
+if errorlevel 1 (echo NO SE PUDO COPIAR el nucleo & exit /b 1)
+fc /b build\ddraw.dll game\ddraw.dll >nul 2>nul || copy /y build\ddraw.dll game\ddraw.dll >nul 2>nul || echo AVISO: ddraw.dll en uso, los juegos abiertos siguen con el cargador viejo
 echo BUILD OK

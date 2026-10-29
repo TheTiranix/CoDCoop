@@ -30,6 +30,19 @@ switch ($What) {
     $bmp.Save($A1)
     $A1
   }
+  'shotj' {  # captura solo la ventana del que se une (la pone adelante un momento)
+    Add-Type 'using System; using System.Runtime.InteropServices; public static class J { [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f); [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out R r); [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); public struct R { public int L, T, Rt, B; } }'
+    Add-Type -AssemblyName System.Drawing
+    [J]::SetProcessDPIAware() | Out-Null  # GetWindowRect y CopyFromScreen en pixeles reales
+    $p = @(Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Sort-Object StartTime)[-1]
+    [J]::SetWindowPos($p.MainWindowHandle, [IntPtr](-1), 0, 0, 0, 0, 0x13) | Out-Null; Start-Sleep -Milliseconds 400
+    $r = New-Object J+R; [J]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+    $bmp = New-Object System.Drawing.Bitmap ($r.Rt - $r.L), ($r.B - $r.T)
+    [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
+    $bmp.Save($A1)
+    [J]::SetWindowPos($p.MainWindowHandle, [IntPtr](-2), 0, 0, 0, 0, 0x13) | Out-Null
+    $A1
+  }
   'click' {  # clic en todas las ventanas de prueba ("Haz clic para iniciar" tras cargar)
     Add-Type 'using System; using System.Runtime.InteropServices; public static class M { [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }'
     foreach ($p in Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' }) {

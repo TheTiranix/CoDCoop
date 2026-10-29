@@ -76,6 +76,27 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   +0x3c gravity, +0x44 speed, +0x54 groundEntityNum, +0x9c clientNum, +0xa0 weapon, +0xe4 health.
 - usercmd (client_t+0x30, 11 dwords): +0 serverTime, +4 buttons, +0x14 forwardmove (byte).
 
+## Recarga en caliente (fase 0)
+- ddraw.dll (src/loader.cpp) = cargador FIJO: proxy, ganchos, registro de crashes, comandos.
+  codcoop_core.dll (src/core.cpp) = logica. build.bat copia el nucleo a game\; los juegos abiertos lo
+  detectan (archivo nuevo y quieto 1 s) y lo recargan solos (`coopreload` en su consola). Cargan una
+  COPIA en game\codcoop_tmp para que el build pueda pisar el original.
+- Contrato en src/api.h. Todo lo que debe sobrevivir va en `State` (core.cpp); la memoria la guarda el
+  cargador. Si cambia sizeof(State) o STATE_VERSION, se pone en cero (hay que volver a conectar).
+- Comandos: el nucleo da la lista (Coop_Commands) y el cargador los registra con un despachador fijo.
+  Un comando NUEVO aparece en la consola recien al recargar.
+- Cambios en loader.cpp o game.h que use el cargador SI requieren reiniciar los juegos.
+- Pruebas: `coopgod <n> [0|1]`, `cooplook <n> <ent>`, `coopdobj`, `coopbring <n> [x y z]`,
+  `tools\run.ps1 shotj <png>` (ventana del que se une, con DPI real).
+
+## Trampas encontradas en el tramo 2
+- 0x420d40 es Cmd_AddServerCommand (solo corre dentro del frame del servidor). Cmd_AddCommand = 0x4213d0.
+- 0x4254b0 es busqueda de ARCHIVOS ("%s/%s%s", extension en EBX). XModel por nombre = XModelPrecache
+  0x4802f0 (ECX = nombre sin "xmodel/", pila (0, 0x431380, 0)).
+- Al liberar un DObj con arbol propio: Com_ServerDObjFree, Com_SyncClientDObjs y RECIEN DESPUES liberar
+  el arbol (DObjFree 0x477020 lee dobj->tree->anims).
+- Com_SyncClientDObjs (0x431150) lo dispara un trap del juego: en el que se une hay que llamarlo a mano.
+
 ## Estado
 - Tramo 1 FUNCIONA (2026-10-29, probado con 2 juegos en esta PC): el 2do jugador se conecta al slot 1,
   ve el mundo desde su posicion con los snapshots del host y camina (el host lo mueve con sus usercmds).

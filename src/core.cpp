@@ -1,15 +1,50 @@
-// Coop: el host corre la campaña y los demas se conectan como clientes 1..3 de su servidor.
+// Nucleo del coop (codcoop_core.dll, recargable en caliente por ddraw.dll):
+// el host corre la campaña y los demas se conectan como clientes 1..3 de su servidor.
 // Transporte UDP propio (el exe solo tiene loopback) + canal de control para lo que el SP
-// comparte por memoria entre servidor y cliente (gamestate y estados de entidad).
+// comparte por memoria entre servidor y cliente (gamestate, estados de entidad, DObj, animaciones).
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include "api.h"
 #include "game.h"
-#include "hook.h"
 
-void Log(const char* fmt, ...);
+static const CoreApi* g_api;
+
+void Log(const char* fmt, ...)
+{
+    char b[2048];
+    va_list a;
+    va_start(a, fmt);
+    vsnprintf(b, sizeof b, fmt, a);
+    va_end(a);
+    if (g_api) g_api->logLine(b);
+}
+
+// VM_Call 0x44f270: EAX = vm, 13 argumentos en la pila (ver game.h GameCall)
+asm(R"(
+.intel_syntax noprefix
+.globl _CallVM
+_CallVM:
+    push esi
+    push edi
+    mov eax, [esp+12]
+    mov esi, [esp+16]
+    sub esp, 52
+    mov edi, esp
+    mov ecx, 13
+    rep movsd
+    mov edx, 0x44f270
+    call edx
+    add esp, 52
+    pop edi
+    pop esi
+    ret
+.att_syntax
+)");
 
 namespace {
 
@@ -19,8 +54,6 @@ constexpr int ANIM_STATE = 22;  // estado cliente de un XAnimInfo: +0x1c(4) +0x2
 constexpr int MAX_PACKET = 1400;
 
 enum Role { NONE, HOST, JOINER };
-Role g_role = NONE;
-SOCKET g_sock = INVALID_SOCKET;
 
 // host: por slot remoto
 struct Remote {
@@ -31,7 +64,25 @@ struct Remote {
     uint32_t dobjSig[g::MAX_GENTITIES];  // ultima forma de DObj mandada (0 = sin DObj)
     DWORD dobjSent[g::MAX_GENTITIES];
 };
-Remote* g_remote[g::MAX_CLIENTS];
+
+// Todo lo que tiene que sobrevivir a una recarga del nucleo. La memoria la guarda ddraw.dll; si cambia
+// el tamaño o STATE_VERSION, el cargador la pone en cero (se pierde la conexion).
+constexpr uint32_t STATE_VERSION = 1;
+struct State {
+    int role;
+    SOCKET sock;
+    Remote remote[g::MAX_CLIENTS];  // host
+    bool god[g::MAX_CLIENTS];       // prueba: vida al maximo
+    sockaddr_in host;               // joiner
+    DWORD lastJoinTry;
+    bool joined, frozen;
+    int slot;
+    int frozenTime;
+    char hostMap[64];
+    uint8_t* ownTree[g::MAX_GENTITIES];  // arboles de animacion creados por nosotros
+    char cs[g::MAX_CONFIGSTRINGS][1024];
+};
+State* S;
 
 // diagnostico: contadores que se vuelcan al log cada 5 s
 int g_statSnaps, g_statEnts, g_statRecv, g_statCtrl;
@@ -52,32 +103,24 @@ void StatsTick()
     g_statSnaps = g_statEnts = g_statRecv = g_statCtrl = 0;
 }
 
-// joiner
-sockaddr_in g_host;
-DWORD g_lastJoinTry;
-bool g_joined, g_frozen;
-int g_slot;
-char g_cs[g::MAX_CONFIGSTRINGS][1024];
-char g_hostMap[64];
-
 bool OpenSocket(int port)
 {
-    if (g_sock != INVALID_SOCKET) return true;
+    if (S->sock != INVALID_SOCKET) return true;
     WSADATA w;
     WSAStartup(MAKEWORD(2, 2), &w);
-    g_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    S->sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     u_long nb = 1;
-    ioctlsocket(g_sock, FIONBIO, &nb);
+    ioctlsocket(S->sock, FIONBIO, &nb);
     int buf = 1 << 20;
-    setsockopt(g_sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf, sizeof buf);
-    setsockopt(g_sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf, sizeof buf);
+    setsockopt(S->sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf, sizeof buf);
+    setsockopt(S->sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf, sizeof buf);
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_port = htons((u_short)port);
-    if (bind(g_sock, (sockaddr*)&a, sizeof a) != 0) {
+    if (bind(S->sock, (sockaddr*)&a, sizeof a) != 0) {
         Log("bind %d fallo: %d", port, WSAGetLastError());
-        closesocket(g_sock);
-        g_sock = INVALID_SOCKET;
+        closesocket(S->sock);
+        S->sock = INVALID_SOCKET;
         return false;
     }
     Log("socket UDP en puerto %d", port);
@@ -104,7 +147,7 @@ sockaddr_in ToSock(const netadr_t& n)
 
 void SendTo(const sockaddr_in& to, const void* data, int len)
 {
-    sendto(g_sock, (const char*)data, len, 0, (const sockaddr*)&to, sizeof to);
+    sendto(S->sock, (const char*)data, len, 0, (const sockaddr*)&to, sizeof to);
 }
 
 // Paquete de control: [CTRL][tipo][datos]
@@ -139,15 +182,15 @@ const char* SafeStr(const void* p)
 int FindSlot(const sockaddr_in& from)
 {
     for (int n = 1; n < g::MAX_CLIENTS; ++n)
-        if (g_remote[n] && g_remote[n]->active && g_remote[n]->addr.sin_addr.s_addr == from.sin_addr.s_addr &&
-            g_remote[n]->addr.sin_port == from.sin_port)
+        if (S->remote[n].active && S->remote[n].addr.sin_addr.s_addr == from.sin_addr.s_addr &&
+            S->remote[n].addr.sin_port == from.sin_port)
             return n;
     return -1;
 }
 
 void SendGamestate(int n)
 {
-    const sockaddr_in& to = g_remote[n]->addr;
+    const sockaddr_in& to = S->remote[n].addr;
     Writer w(M_CS);
     for (int i = 0; i < g::MAX_CONFIGSTRINGS; ++i) {
         const char* s = g::ConfigString(i);
@@ -204,11 +247,11 @@ void HostJoin(const sockaddr_in& from, Reader r)
             SendTo(from, w.buf, w.len);
             return;
         }
-        if (!g_remote[n]) g_remote[n] = (Remote*)calloc(1, sizeof(Remote));
-        memset(g_remote[n], 0, sizeof(Remote));
-        memset(g_remote[n]->dobjSig, 0xff, sizeof g_remote[n]->dobjSig);  // la primera vez se manda todo, incluso "sin DObj"
-        g_remote[n]->active = true;
-        g_remote[n]->addr = from;
+        Remote* rm = &S->remote[n];
+        memset(rm, 0, sizeof *rm);
+        memset(rm->dobjSig, 0xff, sizeof rm->dobjSig);  // la primera vez se manda todo, incluso "sin DObj"
+        rm->active = true;
+        rm->addr = from;
 
         // como SVC_DirectConnect (0x448d70) pero en el slot n y continuando los contadores del que entra
         uint8_t* cl = g::Client(n);
@@ -249,7 +292,7 @@ void HostJoin(const sockaddr_in& from, Reader r)
 // estados de entidad que el SP no manda en el snapshot (el cgame los lee de la memoria del servidor)
 void SendEntities(int n)
 {
-    Remote* rm = g_remote[n];
+    Remote* rm = &S->remote[n];
     DWORD now = GetTickCount();
     Writer w(M_ENTS);
     int countPos = w.len;
@@ -322,7 +365,7 @@ bool GetStr(Reader& r, char* out, int size)
 // Se llama justo despues de SV_SendClientSnapshot, que ya copio el estado servidor -> cliente (0x44d8e0).
 void SendDObjs(int n)
 {
-    Remote* rm = g_remote[n];
+    Remote* rm = &S->remote[n];
     DWORD now = GetTickCount();
     Writer aw(M_ANIM);
     for (int i = 0; i < g::snap_numEntities; ++i) {
@@ -374,9 +417,6 @@ void SendDObjs(int n)
     if (aw.len > 5) SendTo(rm->addr, aw.buf, aw.len);
 }
 
-// joiner: arboles que creamos nosotros (los del juego local congelado no se tocan al liberar)
-uint8_t* g_ownTree[g::MAX_GENTITIES];
-
 void FreeTreeInfos(uint8_t* tree)
 {
     int size = *(int*)(*(uint8_t**)tree + 4);
@@ -391,8 +431,8 @@ void FreeTreeInfos(uint8_t* tree)
 // al DObj recien en Com_SyncClientDObjs.
 void JoinerFreeDObj(int e)
 {
-    uint8_t* tree = g_ownTree[e];
-    g_ownTree[e] = nullptr;
+    uint8_t* tree = S->ownTree[e];
+    S->ownTree[e] = nullptr;
     if (g::serverObjMap[e]) g::Com_ServerDObjFree(e);
     g::Com_SyncClientDObjs();
     if (tree) {
@@ -445,7 +485,7 @@ void JoinerApplyDObj(Reader r)
     if (!same) {
         JoinerFreeDObj(e);
         uint8_t* tree = xanim ? g::XAnimCreateTree(xanim) : nullptr;
-        g_ownTree[e] = tree;
+        S->ownTree[e] = tree;
         g::Com_ServerDObjCreate(models, nm, tree, e, u12);
         d = g::ServerDObj(e);
         if (!d) return;
@@ -506,65 +546,65 @@ void JoinerSendJoin()
     w.Put<int>(*(int*)(g::clc_netchan + g::NC_IN));
     w.Put<int>(g::clc_serverCommandSequence);
     w.Put<int>(g::clc_reliableSequence);
-    SendTo(g_host, w.buf, w.len);
-    g_lastJoinTry = GetTickCount();
+    SendTo(S->host, w.buf, w.len);
+    S->lastJoinTry = GetTickCount();
 }
 
 void JoinerHijack()
 {
-    if (strcmp(g_hostMap, g::CvarString("mapname")) != 0) {
+    if (strcmp(S->hostMap, g::CvarString("mapname")) != 0) {
         g::Com_Printf("^1COOP: el host esta en '%s' y vos en '%s'. Carga el mismo mapa y repeti coopjoin.\n",
-                      g_hostMap, g::CvarString("mapname"));
-        Log("joiner: mapa distinto (host %s, local %s)", g_hostMap, g::CvarString("mapname"));
-        g_role = NONE;
+                      S->hostMap, g::CvarString("mapname"));
+        Log("joiner: mapa distinto (host %s, local %s)", S->hostMap, g::CvarString("mapname"));
+        S->role = NONE;
         return;
     }
-    g_frozen = true;                              // el servidor local queda solo para colision y assets
+    S->frozen = true;                              // el servidor local queda solo para colision y assets
     *(int*)(g::Client(0) + g::CL_STATE) = 0;      // que no acumule comandos que nadie confirma
     for (int i = 0; i < g::MAX_CONFIGSTRINGS; ++i)
-        if (strcmp(g::ConfigString(i), g_cs[i]) != 0) g::SV_SetConfigstring(i, g_cs[i]);
+        if (strcmp(g::ConfigString(i), S->cs[i]) != 0) g::SV_SetConfigstring(i, S->cs[i]);
     int state = g::cls_state;
-    g::CL_NetchanSetup(ToNet(g_host));
+    g::CL_NetchanSetup(ToNet(S->host));
     g::cls_state = state;
     g::CL_ApplyConfigstrings(g::sv_configstrings);
-    g_joined = true;
-    Log("joiner: conectado al host como slot %d en %s", g_slot, g_hostMap);
-    g::Com_Printf("^2COOP: conectado al host (jugador %d)\n", g_slot + 1);
+    S->joined = true;
+    Log("joiner: conectado al host como slot %d en %s", S->slot, S->hostMap);
+    g::Com_Printf("^2COOP: conectado al host (jugador %d)\n", S->slot + 1);
 }
 
 void JoinerControl(uint8_t type, Reader r)
 {
     switch (type) {
     case M_ACCEPT:
-        if (g_joined) return;
-        g_slot = r.Get<int>();
-        strncpy(g_hostMap, (const char*)r.p, sizeof g_hostMap - 1);
-        memset(g_cs, 0, sizeof g_cs);
+        if (S->joined) return;
+        S->slot = r.Get<int>();
+        strncpy(S->hostMap, (const char*)r.p, sizeof S->hostMap - 1);
+        memset(S->cs, 0, sizeof S->cs);
         break;
     case M_FULL:
         g::Com_Printf("^1COOP: el host esta lleno (4 jugadores)\n");
-        g_role = NONE;
+        S->role = NONE;
         break;
     case M_CS:
         while (r.p + 4 <= r.end) {
             int i = r.Get<uint16_t>(), l = r.Get<uint16_t>();
             if (i >= g::MAX_CONFIGSTRINGS || l > 1000 || r.p + l > r.end) break;
-            memcpy(g_cs[i], r.p, l);
-            g_cs[i][l] = 0;
+            memcpy(S->cs[i], r.p, l);
+            S->cs[i][l] = 0;
             r.p += l;
         }
         break;
     case M_CSDONE:
-        if (!g_joined && g_hostMap[0]) JoinerHijack();
+        if (!S->joined && S->hostMap[0]) JoinerHijack();
         break;
     case M_DOBJ:
-        if (g_joined) JoinerApplyDObj(r);
+        if (S->joined) JoinerApplyDObj(r);
         break;
     case M_ANIM:
-        if (g_joined) JoinerApplyAnims(r);
+        if (S->joined) JoinerApplyAnims(r);
         break;
     case M_ENTS: {
-        if (!g_joined) return;
+        if (!S->joined) return;
         int count = r.Get<uint16_t>();
         for (int k = 0; k < count && r.p + 2 + g::ENTSTATE_SIZE <= r.end; ++k) {
             int e = r.Get<uint16_t>();
@@ -585,7 +625,7 @@ void Cmd_CoopHost()
         g::Com_Printf("^1COOP: no se pudo abrir el puerto UDP %d\n", port);
         return;
     }
-    g_role = HOST;
+    S->role = HOST;
     g::Com_Printf("^2COOP: host listo en el puerto %d. Los demas: coopjoin <tu ip>\n", port);
 }
 
@@ -608,12 +648,12 @@ void Cmd_CoopJoin()
         g::Com_Printf("^1COOP: no se encontro '%s'\n", host);
         return;
     }
-    g_host = *(sockaddr_in*)res->ai_addr;
-    g_host.sin_port = htons((u_short)port);
+    S->host = *(sockaddr_in*)res->ai_addr;
+    S->host.sin_port = htons((u_short)port);
     freeaddrinfo(res);
-    g_role = JOINER;
-    g_joined = false;
-    g_hostMap[0] = 0;
+    S->role = JOINER;
+    S->joined = false;
+    S->hostMap[0] = 0;
     JoinerSendJoin();
     g::Com_Printf("COOP: uniendose a %s:%d...\n", host, port);
 }
@@ -717,53 +757,121 @@ void Cmd_CoopDObj()
     Log("dobj: %d infos de animacion en uso", *(int*)0xa6d000);
 }
 
-bool g_cmdsReady;
-void RegisterCommands()
+// prueba: coopgod <n> [0|1] -> el host le mantiene la vida al maximo al jugador n
+void Cmd_CoopGod()
 {
-    g_cmdsReady = true;
-    g::Cmd_AddCommand("coopdobj", Cmd_CoopDObj);
-    g::Cmd_AddCommand("coopbring", Cmd_CoopBring);
-    g::Cmd_AddCommand("coopinfo", Cmd_CoopInfo);
-    g::Cmd_AddCommand("coophost", Cmd_CoopHost);
-    g::Cmd_AddCommand("coopjoin", Cmd_CoopJoin);
-    Log("comandos coophost/coopjoin registrados");
+    int n = atoi(g::Argv(1));
+    if (n < 0 || n >= g::MAX_CLIENTS) return;
+    S->god[n] = g::cmd_argc > 2 ? atoi(g::Argv(2)) != 0 : !S->god[n];
+    Log("coopgod %d = %d", n, S->god[n]);
 }
+
+// prueba: cooplook <n> <ent> -> jugador n a 150 unidades de la entidad y mirandola.
+// La vista es SHORT2ANGLE(cmd.angles + ps.delta_angles): se ajusta delta_angles (ps+0x48, como Q3).
+void Cmd_CoopLook()
+{
+    int n = atoi(g::Argv(1)), e = atoi(g::Argv(2));
+    uint8_t* gameClients = *(uint8_t**)0x152bc64;
+    if (n < 0 || n >= g::MAX_CLIENTS || e < 0 || e >= g::MAX_GENTITIES || !gameClients) return;
+    uint8_t* ps = gameClients + n * *(int*)0x152bc68;
+    const float* t = (const float*)(g::Entity(e) + 0xe0);  // r.currentOrigin
+    float* o = (float*)(ps + 0x14);
+    float dx = o[0] - t[0], dy = o[1] - t[1], len = sqrtf(dx * dx + dy * dy);
+    if (len < 1) dx = -1, dy = 0, len = 1;
+    o[0] = t[0] + dx / len * 150;
+    o[1] = t[1] + dy / len * 150;
+    o[2] = t[2] + 8;
+    memset(ps + 0x20, 0, 12);  // velocidad
+    float yaw = atan2f(-dy, -dx) * 180.0f / 3.14159265f;
+    const int* cmdAngles = (const int*)(ps + 0x73e4 + 8);  // gclient.pers.cmd.angles
+    int* delta = (int*)(ps + 0x48);
+    delta[0] = -cmdAngles[0];
+    delta[1] = ((int)(yaw * 65536 / 360) & 0xffff) - cmdAngles[1];
+    Log("cooplook %d -> ent %d en (%.0f %.0f %.0f), yaw %.0f", n, e, o[0], o[1], o[2], yaw);
+}
+
+struct CmdDef {
+    const char* name;
+    void (*fn)();
+};
+const CmdDef kCmds[] = {
+    {"coophost", Cmd_CoopHost}, {"coopjoin", Cmd_CoopJoin}, {"coopinfo", Cmd_CoopInfo}, {"coopbring", Cmd_CoopBring},
+    {"coopdobj", Cmd_CoopDObj}, {"coopgod", Cmd_CoopGod},   {"cooplook", Cmd_CoopLook},
+};
 
 }  // namespace
 
-// ---------- ganchos (llamados desde los stubs de main.cpp) ----------
+#define EXPORT extern "C" __declspec(dllexport)
 
-extern "C" void __cdecl Coop_SendPacket(int sock, const void* data, int len, const netadr_t* to)
+EXPORT uint32_t Coop_StateVersion() { return (uint32_t)sizeof(State) ^ (STATE_VERSION << 28); }
+EXPORT int Coop_StateSize() { return (int)sizeof(State); }
+
+EXPORT void Coop_Init(const CoreApi* api, void* state, int fresh)
 {
-    if (g_sock != INVALID_SOCKET) SendTo(ToSock(*to), data, len);
+    g_api = api;
+    S = (State*)state;
+    if (fresh) {
+        S->sock = INVALID_SOCKET;
+        S->role = NONE;
+    }
+    Log("nucleo listo (rol %d, %s)", S->role, fresh ? "estado nuevo" : "estado conservado");
+}
+
+EXPORT void Coop_Shutdown()
+{
+    Log("nucleo descargado");
+    g_api = nullptr;
+}
+
+EXPORT const char* Coop_Commands()
+{
+    static char list[256];
+    if (!list[0])
+        for (const CmdDef& c : kCmds) {
+            strcat(list, c.name);
+            strcat(list, " ");
+        }
+    return list;
+}
+
+EXPORT void Coop_Command(const char* name)
+{
+    for (const CmdDef& c : kCmds)
+        if (!_stricmp(c.name, name)) return c.fn();
+}
+
+// ---------- ganchos (los llama ddraw.dll) ----------
+
+EXPORT void __cdecl Coop_SendPacket(int sock, const void* data, int len, const netadr_t* to)
+{
+    if (S->sock != INVALID_SOCKET) SendTo(ToSock(*to), data, len);
 }
 
 // Se llama cuando la cola loopback de `sock` esta vacia: devuelve paquetes UDP del motor y
 // procesa los de control.
-extern "C" int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
+EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
 {
-    if (!g_cmdsReady) RegisterCommands();
     PollCmdFile();
     StatsTick();
-    if (g_sock == INVALID_SOCKET) return 0;
-    if (!((g_role == HOST && sock == NS_SERVER) || (g_role == JOINER && sock == NS_CLIENT))) return 0;
-    if (g_role == JOINER && !g_joined && GetTickCount() - g_lastJoinTry > 1000) JoinerSendJoin();
+    if (S->sock == INVALID_SOCKET) return 0;
+    if (!((S->role == HOST && sock == NS_SERVER) || (S->role == JOINER && sock == NS_CLIENT))) return 0;
+    if (S->role == JOINER && !S->joined && GetTickCount() - S->lastJoinTry > 1000) JoinerSendJoin();
 
     static uint8_t buf[0x10000];
     for (;;) {
         sockaddr_in a;
         int alen = sizeof a;
-        int n = recvfrom(g_sock, (char*)buf, sizeof buf, 0, (sockaddr*)&a, &alen);
+        int n = recvfrom(S->sock, (char*)buf, sizeof buf, 0, (sockaddr*)&a, &alen);
         if (n <= 0) return 0;
         if (n >= 5 && *(uint32_t*)buf == CTRL) {
             ++g_statCtrl;
             Reader r{buf + 5, buf + n};
-            if (g_role == HOST && buf[4] == M_JOIN) HostJoin(a, r);
-            else if (g_role == JOINER) JoinerControl(buf[4], r);
+            if (S->role == HOST && buf[4] == M_JOIN) HostJoin(a, r);
+            else if (S->role == JOINER) JoinerControl(buf[4], r);
             continue;
         }
         if (n > msg->maxsize) continue;
-        if (g_role == JOINER && !g_joined) continue;
+        if (S->role == JOINER && !S->joined) continue;
         memcpy(msg->data, buf, n);
         msg->cursize = n;
         *from = ToNet(a);
@@ -773,13 +881,20 @@ extern "C" int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
 }
 
 // Despues de SV_SendClientMessages (que solo atiende al slot 0): snapshots + estados a los remotos.
-extern "C" void __cdecl Coop_HostFrame()
+EXPORT void __cdecl Coop_HostFrame()
 {
-    if (g_role != HOST) return;
+    if (S->role != HOST) return;
+    uint8_t* gameClients = *(uint8_t**)0x152bc64;
+    for (int n = 0; n < g::MAX_CLIENTS; ++n) {
+        if (!S->god[n] || !gameClients || *(int*)(g::Client(n) + g::CL_STATE) != 1) continue;
+        uint8_t* ps = gameClients + n * *(int*)0x152bc68;
+        *(int*)(ps + 0xe4) = *(int*)(ps + 0xec);                // ps.stats vida = maxima
+        *(int*)(g::Entity(n) + 0x1d8) = *(int*)(ps + 0xec);     // ent->health (ver ClientSpawn)
+    }
     for (int n = 1; n < g::MAX_CLIENTS; ++n) {
-        if (!g_remote[n] || !g_remote[n]->active) continue;
+        if (!S->remote[n].active) continue;
         uint8_t* cl = g::Client(n);
-        if (*(int*)(cl + g::CL_STATE) != 1) { g_remote[n]->active = false; continue; }
+        if (*(int*)(cl + g::CL_STATE) != 1) { S->remote[n].active = false; continue; }
         FixClientNum(n);
         GiveHostLoadout(n);
         g::SV_SendClientSnapshot(cl);
@@ -791,10 +906,10 @@ extern "C" void __cdecl Coop_HostFrame()
 
 // En el que se une el servidor local no corre, pero el cliente del SP toma su reloj de sv.time
 // (CL_Frame 0x40df80): lo avanzamos siguiendo al ultimo snapshot del host, un snapshot atras para interpolar.
-extern "C" bool Coop_FrozenFrame(int msec)
+EXPORT int __cdecl Coop_FrozenFrame(int msec)
 {
-    if (!g_frozen) return false;
-    static int t;
+    if (!S->frozen) return 0;
+    int& t = S->frozenTime;
     int latest = *(int*)0x1426e68;  // cl.snap.serverTime
     int target = latest - 50;
     t += msec;
@@ -803,5 +918,5 @@ extern "C" bool Coop_FrozenFrame(int msec)
     else if (t < target - 10) t += 1;  // se acerca de a poco
     *(int*)0x152e930 = t;               // sv.time
     g::Com_SyncClientDObjs();           // lo hace un trap del juego, que aca no corre
-    return true;
+    return 1;
 }
