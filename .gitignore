@@ -1,0 +1,7 @@
+game/
+out/
+ghidra/CoD.*
+ghidra/*.rep/
+ghidra/*.gpr
+build/
+__pycache__/

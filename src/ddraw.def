@@ -1,0 +1,4 @@
+LIBRARY ddraw.dll
+EXPORTS
+DirectDrawCreateEx=Proxy_DirectDrawCreateEx@16
+DirectDrawEnumerateExA=Proxy_DirectDrawEnumerateExA@12
