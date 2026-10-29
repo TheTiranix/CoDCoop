@@ -145,6 +145,30 @@ static void InstallHooks()
         (void*)g_origSendClientMessages, (void*)g_origSvFrame);
 }
 
+// Crash sin manejar: direccion y posibles direcciones de retorno de la pila (codigo del exe o de las DLL).
+static LONG WINAPI CrashLog(EXCEPTION_POINTERS* ep)
+{
+    CONTEXT* c = ep->ContextRecord;
+    Log("CRASH %08lx en %08lx (eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx)",
+        ep->ExceptionRecord->ExceptionCode, (unsigned long)(uintptr_t)ep->ExceptionRecord->ExceptionAddress, c->Eax,
+        c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi);
+    char line[512];
+    int len = 0, found = 0;
+    const uint32_t* sp = (const uint32_t*)c->Esp;
+    for (int i = 0; i < 2048 && found < 16 && !IsBadReadPtr(sp + i, 4); ++i) {
+        uint32_t v = sp[i];
+        HMODULE m;
+        if ((v >= 0x401000 && v < 0x533000) ||
+            (v > 0x10000000 && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                                  (LPCSTR)(uintptr_t)v, &m) && m != GetModuleHandleA("kernel32.dll"))) {
+            len += snprintf(line + len, sizeof line - len, " %08x", v);
+            ++found;
+        }
+    }
+    Log("  pila:%s", line);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -155,6 +179,7 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID)
         g_log = fopen(p, "w");
         Log("codcoop cargado en %s, exe base %p", GetCommandLineA(), GetModuleHandleA(nullptr));
         InstallHooks();
+        SetUnhandledExceptionFilter(CrashLog);
     }
     return TRUE;
 }

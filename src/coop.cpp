@@ -14,7 +14,8 @@ void Log(const char* fmt, ...);
 namespace {
 
 constexpr uint32_t CTRL = 0xFFFFFFFE;  // prefijo de nuestros paquetes; el motor usa -1 (sin conexion) o una secuencia
-enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CS = 'C', M_CSDONE = 'G', M_ENTS = 'E' };
+enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CS = 'C', M_CSDONE = 'G', M_ENTS = 'E', M_DOBJ = 'D', M_ANIM = 'N' };
+constexpr int ANIM_STATE = 22;  // estado cliente de un XAnimInfo: +0x1c(4) +0x24(2) +0x28..+0x37(16)
 constexpr int MAX_PACKET = 1400;
 
 enum Role { NONE, HOST, JOINER };
@@ -27,6 +28,8 @@ struct Remote {
     sockaddr_in addr;
     uint8_t lastEnt[g::MAX_GENTITIES][g::ENTSTATE_SIZE];
     DWORD lastSent[g::MAX_GENTITIES];
+    uint32_t dobjSig[g::MAX_GENTITIES];  // ultima forma de DObj mandada (0 = sin DObj)
+    DWORD dobjSent[g::MAX_GENTITIES];
 };
 Remote* g_remote[g::MAX_CLIENTS];
 
@@ -126,6 +129,11 @@ struct Reader {
     bool Ok() const { return p <= end; }
 };
 
+const char* SafeStr(const void* p)
+{
+    return p && !IsBadReadPtr(p, 4) ? (const char*)p : "?";
+}
+
 // ---------- host ----------
 
 int FindSlot(const sockaddr_in& from)
@@ -198,6 +206,7 @@ void HostJoin(const sockaddr_in& from, Reader r)
         }
         if (!g_remote[n]) g_remote[n] = (Remote*)calloc(1, sizeof(Remote));
         memset(g_remote[n], 0, sizeof(Remote));
+        memset(g_remote[n]->dobjSig, 0xff, sizeof g_remote[n]->dobjSig);  // la primera vez se manda todo, incluso "sin DObj"
         g_remote[n]->active = true;
         g_remote[n]->addr = from;
 
@@ -272,6 +281,222 @@ void SendEntities(int n)
     flush();
 }
 
+// ---------- DObj y animaciones (el SP los comparte por memoria entre servidor y cliente) ----------
+
+uint32_t DObjSig(const uint8_t* d)
+{
+    uint32_t h = 2166136261u;
+    auto mix = [&](const void* p, int len) {
+        for (int i = 0; i < len; ++i) h = (h ^ ((const uint8_t*)p)[i]) * 16777619u;
+    };
+    uint8_t* tree = *(uint8_t**)d;
+    void* xanim = tree ? *(void**)tree : nullptr;
+    mix(d + 0x12, 2);
+    mix(d + 0x16, 1);
+    mix(d + 0x18, 0x20);
+    mix(d + 0x38, 0x10);
+    mix(d + 0x48, 8);
+    mix(&xanim, 4);
+    return h ? h : 1;
+}
+
+void PutStr(Writer& w, const char* s)
+{
+    int l = (int)strlen(s);
+    if (l > 200) l = 200;
+    w.Put<uint8_t>((uint8_t)l);
+    w.Put(s, l);
+}
+
+bool GetStr(Reader& r, char* out, int size)
+{
+    int l = r.Get<uint8_t>();
+    if (r.p + l > r.end || l >= size) return false;
+    memcpy(out, r.p, l);
+    out[l] = 0;
+    r.p += l;
+    return true;
+}
+
+// host: forma del DObj (cuando cambia o cada 2 s) y estado de animacion (cada snapshot) de lo visible.
+// Se llama justo despues de SV_SendClientSnapshot, que ya copio el estado servidor -> cliente (0x44d8e0).
+void SendDObjs(int n)
+{
+    Remote* rm = g_remote[n];
+    DWORD now = GetTickCount();
+    Writer aw(M_ANIM);
+    for (int i = 0; i < g::snap_numEntities; ++i) {
+        int e = g::snap_entities[i];
+        if (e < 0 || e >= g::MAX_GENTITIES) continue;
+        uint8_t* d = g::ServerDObj(e);
+        uint32_t sig = d ? DObjSig(d) : 0;
+        if (sig != rm->dobjSig[e] || (sig && now - rm->dobjSent[e] > 2000)) {
+            Writer w(M_DOBJ);
+            int nm = d ? d[0x16] : 0;
+            if (nm > 8) nm = 8;
+            w.Put<uint16_t>((uint16_t)e);
+            w.Put<uint8_t>((uint8_t)nm);
+            w.Put<uint16_t>(d ? *(uint16_t*)(d + 0x12) : 0);
+            uint8_t* tree = d ? *(uint8_t**)d : nullptr;
+            PutStr(w, tree ? SafeStr(**(char***)tree) : "");
+            for (int k = 0; k < nm; ++k) {
+                uint8_t* model = *(uint8_t**)(d + 0x18 + k * 4);
+                PutStr(w, model ? SafeStr(*(char**)model) : "");
+                w.Put<uint8_t>(d[0x48 + k]);
+                w.Put<uint16_t>(*(uint16_t*)(d + 0x38 + k * 2));
+            }
+            SendTo(rm->addr, w.buf, w.len);
+            rm->dobjSig[e] = sig;
+            rm->dobjSent[e] = now;
+        }
+        uint8_t* tree = d ? *(uint8_t**)d : nullptr;
+        if (!tree) continue;
+        int size = *(int*)(*(uint8_t**)tree + 4);
+        int count = 0;
+        for (int a = 0; a < size; ++a)
+            if (*(uint16_t*)(tree + 8 + a * 2)) ++count;
+        if (aw.len + 4 + count * (2 + ANIM_STATE) > MAX_PACKET) {
+            SendTo(rm->addr, aw.buf, aw.len);
+            aw = Writer(M_ANIM);
+        }
+        aw.Put<uint16_t>((uint16_t)e);
+        aw.Put<uint16_t>((uint16_t)count);
+        for (int a = 0; a < size; ++a) {
+            uint16_t idx = *(uint16_t*)(tree + 8 + a * 2);
+            if (!idx) continue;
+            const uint8_t* info = g::xanimInfo + idx * 0x44;
+            aw.Put<uint16_t>((uint16_t)a);
+            aw.Put(info + 0x1c, 4);
+            aw.Put(info + 0x24, 2);
+            aw.Put(info + 0x28, 16);
+        }
+    }
+    if (aw.len > 5) SendTo(rm->addr, aw.buf, aw.len);
+}
+
+// joiner: arboles que creamos nosotros (los del juego local congelado no se tocan al liberar)
+uint8_t* g_ownTree[g::MAX_GENTITIES];
+
+void FreeTreeInfos(uint8_t* tree)
+{
+    int size = *(int*)(*(uint8_t**)tree + 4);
+    for (int a = 0; a < size; ++a) {
+        uint16_t* slot = (uint16_t*)(tree + 8 + a * 2);
+        if (*slot) g::XAnimFreeInfo(*slot);
+        *slot = 0;
+    }
+}
+
+// El arbol se libera al final: DObjFree (0x477020) todavia lo usa, y el cliente suelta su referencia
+// al DObj recien en Com_SyncClientDObjs.
+void JoinerFreeDObj(int e)
+{
+    uint8_t* tree = g_ownTree[e];
+    g_ownTree[e] = nullptr;
+    if (g::serverObjMap[e]) g::Com_ServerDObjFree(e);
+    g::Com_SyncClientDObjs();
+    if (tree) {
+        FreeTreeInfos(tree);
+        g::XAnimFreeTree(tree);
+    }
+}
+
+uint8_t* FindXAnim(const char* name)
+{
+    for (int i = 0; i < 256; ++i) {
+        uint8_t* x = g::xanimTable[i];
+        if (x && !_stricmp(SafeStr(*(char**)x), name)) return x;
+    }
+    return nullptr;
+}
+
+void JoinerApplyDObj(Reader r)
+{
+    struct ModelEntry {
+        void* model;
+        const char* tag;
+        uint16_t flags;
+        uint16_t pad;
+    } models[8] = {};
+    uint8_t parents[8];
+    char name[256], animName[256];
+    int e = r.Get<uint16_t>(), nm = r.Get<uint8_t>(), u12 = r.Get<uint16_t>();
+    if (e >= g::MAX_GENTITIES || nm > 8 || !GetStr(r, animName, sizeof animName)) return;
+    for (int k = 0; k < nm; ++k) {
+        if (!GetStr(r, name, sizeof name)) return;
+        parents[k] = r.Get<uint8_t>();
+        models[k].flags = r.Get<uint16_t>();
+        models[k].model = g::XModelPrecache(name);  // si no estaba cargado lo carga
+        if (!models[k].model || _stricmp(SafeStr(*(char**)models[k].model), name) != 0) {
+            Log("dobj %d: modelo '%s' no resuelto", e, name);
+            return;
+        }
+    }
+    if (!r.Ok()) return;
+    if (!nm) {
+        JoinerFreeDObj(e);
+        return;
+    }
+    uint8_t* xanim = animName[0] ? FindXAnim(animName) : nullptr;
+    if (animName[0] && !xanim) Log("dobj %d: no hay arbol de animacion '%s' aca", e, animName);
+    uint8_t* d = g::ServerDObj(e);
+    bool same = d && d[0x16] == nm && (*(uint8_t**)d ? **(uint8_t***)d : nullptr) == xanim;
+    for (int k = 0; same && k < nm; ++k) same = *(void**)(d + 0x18 + k * 4) == models[k].model;
+    if (!same) {
+        JoinerFreeDObj(e);
+        uint8_t* tree = xanim ? g::XAnimCreateTree(xanim) : nullptr;
+        g_ownTree[e] = tree;
+        g::Com_ServerDObjCreate(models, nm, tree, e, u12);
+        d = g::ServerDObj(e);
+        if (!d) return;
+    }
+    for (int k = 0; k < nm; ++k) {
+        d[0x48 + k] = parents[k];
+        *(uint16_t*)(d + 0x38 + k * 2) = models[k].flags;
+    }
+}
+
+void JoinerApplyAnims(Reader r)
+{
+    static uint8_t seen[4096];
+    while (r.p + 4 <= r.end) {
+        int e = r.Get<uint16_t>(), count = r.Get<uint16_t>();
+        if (r.p + count * (2 + ANIM_STATE) > r.end || e >= g::MAX_GENTITIES) return;
+        uint8_t* d = g::ServerDObj(e);
+        uint8_t* tree = d ? *(uint8_t**)d : nullptr;
+        int size = tree ? *(int*)(*(uint8_t**)tree + 4) : 0;
+        if (size > (int)sizeof seen) size = 0;
+        memset(seen, 0, size);
+        for (int k = 0; k < count; ++k) {
+            int a = r.Get<uint16_t>();
+            const uint8_t* st = r.p;
+            r.p += ANIM_STATE;
+            if (a >= size) continue;
+            seen[a] = 1;
+            uint16_t* slot = (uint16_t*)(tree + 8 + a * 2);
+            if (!*slot) {  // como XAnimSetGoalWeight (0x47dd90) cuando el nodo no tenia info
+                uint8_t* p = g::XAnimAllocInfo(tree, a);
+                memset(p + 0xc, 0, 0x38);
+                *(uint16_t*)(p + 4) = 0;
+                *(uint16_t*)(p + 2) = 0xffff;
+                *(uint16_t*)p = 0;
+                *(uint16_t*)(p + 6) = 0;
+            }
+            uint8_t* info = g::xanimInfo + *slot * 0x44;
+            memcpy(info + 0x1c, st, 4);
+            memcpy(info + 0x24, st + 4, 2);
+            memcpy(info + 0x28, st + 6, 16);
+        }
+        for (int a = 0; a < size; ++a) {
+            uint16_t* slot = (uint16_t*)(tree + 8 + a * 2);
+            if (*slot && !seen[a]) {
+                g::XAnimFreeInfo(*slot);
+                *slot = 0;
+            }
+        }
+    }
+}
+
 // ---------- joiner ----------
 
 void JoinerSendJoin()
@@ -331,6 +556,12 @@ void JoinerControl(uint8_t type, Reader r)
         break;
     case M_CSDONE:
         if (!g_joined && g_hostMap[0]) JoinerHijack();
+        break;
+    case M_DOBJ:
+        if (g_joined) JoinerApplyDObj(r);
+        break;
+    case M_ANIM:
+        if (g_joined) JoinerApplyAnims(r);
         break;
     case M_ENTS: {
         if (!g_joined) return;
@@ -447,14 +678,50 @@ void Cmd_CoopBring()
     dst[0] = src[0] + 48;
     dst[1] = src[1];
     dst[2] = src[2] + 8;
+    if (g::cmd_argc >= 5)  // cooptp-style: coopbring n x y z
+        for (int i = 0; i < 3; ++i) dst[i] = (float)atof(g::Argv(2 + i));
     memset(dst + 3, 0, 12);  // velocidad
     Log("coopbring %d -> (%.0f %.0f %.0f)", n, dst[0], dst[1], dst[2]);
+}
+
+// Lista los DObj del servidor: modelos, arbol de animacion y nodos activos (para el tramo 2).
+void Cmd_CoopDObj()
+{
+    const int16_t* serverObjMap = (const int16_t*)0x886f10;
+    int shown = 0;
+    for (int e = 0; e < g::MAX_GENTITIES && shown < 60; ++e) {
+        if (!serverObjMap[e]) continue;
+        uint8_t* d = (uint8_t*)0x888020 + serverObjMap[e] * 0x58;
+        char models[512];
+        int len = 0;
+        int nm = d[0x16];
+        for (int i = 0; i < nm && i < 8; ++i) {
+            uint8_t* m = *(uint8_t**)(d + 0x18 + i * 4);
+            len += snprintf(models + len, sizeof models - len, " %s(p%d)", m ? SafeStr(*(char**)m) : "null", d[0x48 + i]);
+        }
+        uint8_t* tree = *(uint8_t**)d;
+        int active = 0, size = 0;
+        const char* animName = "-";
+        if (tree) {
+            uint8_t* xanim = *(uint8_t**)tree;
+            size = *(int*)(xanim + 4);
+            animName = SafeStr(*(char**)xanim);
+            for (int i = 0; i < size; ++i)
+                if (*(uint16_t*)(tree + 8 + i * 2)) ++active;
+        }
+        const float* org = (const float*)(g::Entity(e) + 0xe0);  // r.currentOrigin
+        Log("dobj ent %d (%.0f %.0f %.0f): modelos %d:%s arbol %p anims '%s' n=%d activos=%d", e, org[0], org[1], org[2], nm,
+            models, tree, animName, size, active);
+        ++shown;
+    }
+    Log("dobj: %d infos de animacion en uso", *(int*)0xa6d000);
 }
 
 bool g_cmdsReady;
 void RegisterCommands()
 {
     g_cmdsReady = true;
+    g::Cmd_AddCommand("coopdobj", Cmd_CoopDObj);
     g::Cmd_AddCommand("coopbring", Cmd_CoopBring);
     g::Cmd_AddCommand("coopinfo", Cmd_CoopInfo);
     g::Cmd_AddCommand("coophost", Cmd_CoopHost);
@@ -518,6 +785,7 @@ extern "C" void __cdecl Coop_HostFrame()
         g::SV_SendClientSnapshot(cl);
         ++g_statSnaps;
         SendEntities(n);
+        SendDObjs(n);
     }
 }
 
@@ -534,5 +802,6 @@ extern "C" bool Coop_FrozenFrame(int msec)
     else if (t > latest) t = latest;   // nunca adelante del ultimo snapshot
     else if (t < target - 10) t += 1;  // se acerca de a poco
     *(int*)0x152e930 = t;               // sv.time
+    g::Com_SyncClientDObjs();           // lo hace un trap del juego, que aca no corre
     return true;
 }

@@ -54,7 +54,9 @@ inline int& clc_serverCommandSequence = *(int*)0x14795c8;
 
 using Printf_t = void(__cdecl*)(const char*, ...);
 inline auto Com_Printf = (Printf_t)0x42e300;
-inline auto Cmd_AddCommand = (void(__cdecl*)(const char*, void (*)()))0x420d40;
+// 0x4213d0 = Cmd_AddCommand local. (0x420d40 es Cmd_AddServerCommand: esos solo corren dentro del frame
+// del servidor, que en el que se une esta congelado.)
+inline auto Cmd_AddCommand = (void(__cdecl*)(const char*, void (*)()))0x4213d0;
 inline auto Z_Malloc = (void*(__cdecl*)(int))0x42a480;
 inline auto Cvar_FindVar = (uint8_t*(__cdecl*)(const char*))0x431920;  // cvar_t: +4 string, +0x20 integer
 inline auto Cbuf_AddText_ = (void*)0x4209d0;                            // texto en EAX
@@ -81,6 +83,45 @@ inline void SV_SendClientSnapshot(uint8_t* cl)  // 0x44d960, client en ECX
 {
     asm volatile("call *%1" : "+c"(cl) : "r"((void*)0x44d960) : "eax", "edx", "memory");
 }
+// --- DObj (modelo + animacion) y XAnim; ver notes/ARQUITECTURA.md "Tramo 2" ---
+constexpr int DOBJ_SIZE = 0x58;
+inline int16_t* serverObjMap = (int16_t*)0x886f10;       // [MAX_GENTITIES] indice de DObj del servidor
+inline uint8_t* dobjPool = (uint8_t*)0x888020;           // DObj: +0 arbol, +0x12 u16, +0x16 nModelos, +0x18 XModel*[8],
+                                                         // +0x38 u16[8], +0x48 hueso padre[8]
+inline uint8_t** xanimTable = (uint8_t**)0x8d84c8;       // [2][128] XAnim* (nombre en +0, cantidad en +4)
+inline uint8_t* xanimInfo = (uint8_t*)0xa6d000;          // pool XAnimInfo 0x44 c/u; estado cliente +0x1c..+0x37
+inline auto Com_ServerDObjCreate = (void(__cdecl*)(void* models, int num, void* tree, int ent, int u12))0x431030;
+inline auto Com_SyncClientDObjs = (void(__cdecl*)())0x431150;  // serverObjMap -> clientObjMap
+inline auto XAnimAllocInfo = (uint8_t*(__cdecl*)(void* tree, int anim))0x47d2d0;  // devuelve info+0x10
+inline void Com_ServerDObjFree(int ent)  // 0x4310f0, ECX = ent
+{
+    asm volatile("call *%1" : "+c"(ent) : "r"((void*)0x4310f0) : "eax", "edx", "memory");
+}
+inline uint8_t* XAnimCreateTree(uint8_t* xanim)  // 0x431400, EBX = XAnim*
+{
+    uint8_t* r;
+    asm volatile("call *%2" : "=a"(r), "+b"(xanim) : "r"((void*)0x431400) : "ecx", "edx", "memory");
+    return r;
+}
+inline void XAnimFreeTree(uint8_t* tree)  // 0x431440, ECX = arbol
+{
+    asm volatile("call *%1" : "+c"(tree) : "r"((void*)0x431440) : "eax", "edx", "memory");
+}
+inline void XAnimFreeInfo(int index)  // 0x47a310, DI = indice del info (no limpia el arbol)
+{
+    asm volatile("call *%1" : "+D"(index) : "r"((void*)0x47a310) : "eax", "ecx", "edx", "memory");
+}
+inline uint8_t* XModelPrecache(const char* name)  // 0x4802f0: ECX = nombre sin "xmodel/", (0, alloc, 0)
+{
+    uint8_t* r;
+    asm volatile("push $0\n\tpush $0x431380\n\tpush $0\n\tcall *%2\n\tadd $12, %%esp"
+                 : "=a"(r), "+c"(name)
+                 : "r"((void*)0x4802f0)
+                 : "edx", "memory");
+    return r;
+}
+inline uint8_t* ServerDObj(int ent) { return serverObjMap[ent] ? dobjPool + serverObjMap[ent] * DOBJ_SIZE : nullptr; }
+
 inline uint8_t* Client(int n) { return svs_clients + n * CLIENT_SIZE; }
 inline uint8_t* Entity(int n) { return sv_gentities + n * sv_gentitySize; }
 // VM_Call 0x44f270 (EAX = vm, 13 args): fija currentVM, que usan los traps del modulo de juego.

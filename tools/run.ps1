@@ -9,6 +9,7 @@ $game = 'D:\CoDCoop\game'
 switch ($What) {
   'host' {
     Remove-Item "$game\__CoDSP" -Force -ErrorAction SilentlyContinue
+    Get-ChildItem $game -Filter 'codcoop*.log' | Remove-Item -Force -ErrorAction SilentlyContinue
     $args = "+set r_fullscreen 0 +set r_mode 3 +set com_introplayed 1 +set logfile 2 +set sv_cheats 1 +devmap $A1 +coophost"
     (Start-Process "$game\CoDSP.exe" -WorkingDirectory $game -ArgumentList $args -PassThru).Id
   }
@@ -37,9 +38,10 @@ switch ($What) {
       [M]::PostMessage($p.MainWindowHandle, 0x202, [IntPtr]0, $l) | Out-Null
     }
   }
-  'layout' {  # host a la izquierda, el que se une a la derecha, encima de todo mientras dura la captura
+  'layout' {  # host a la izquierda, el que se une a la derecha; con "join" solo el que se une, entero a la izquierda
     Add-Type 'using System; using System.Runtime.InteropServices; public static class P { [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f); }'
-    $ps = Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Sort-Object StartTime
+    $ps = @(Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Sort-Object StartTime)
+    if ($A1 -eq 'join' -and $ps.Count -ge 2) { $ps = @($ps[1]) }
     $x = 0
     foreach ($p in $ps) { [P]::SetWindowPos($p.MainWindowHandle, [IntPtr](-1), $x, 0, 0, 0, 0x11) | Out-Null; $x += 650 }
     Start-Sleep 1
