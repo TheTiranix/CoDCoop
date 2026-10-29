@@ -5,3 +5,4 @@ ghidra/*.rep/
 ghidra/*.gpr
 build/
 __pycache__/
+run/
