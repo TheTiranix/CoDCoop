@@ -1,0 +1,26 @@
+		// --- coop: boton del menu principal (lo inserta tools/make_ui.py antes de "Opciones") ---
+		itemDef
+		{
+			name coop
+			text "Cooperativo"
+			type ITEM_TYPE_BUTTON
+			style WINDOW_STYLE_EMPTY
+			textstyle TEXT_ON_BG_STYLE
+			rect 385 310 120 15
+			textalign 0
+			textscale .4
+			textalignx 0
+			textaligny 14
+			textfont UI_FONT_NORMAL
+			forecolor .9 .9 .9 .9
+			visible 1
+			mouseEnter
+			{
+				play "mouse_over";
+			}
+			action
+			{
+				play "mouse_click";
+				open coop_popmenu
+			}
+		}

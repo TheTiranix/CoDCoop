@@ -1,0 +1,167 @@
+	// --- coop: ventana del boton "Cooperativo" (la agrega tools/make_ui.py al final de ui/main.menu) ---
+	menuDef
+	{
+		name "coop_popmenu"
+		visible 0
+		fullscreen 0
+		rect 174 130 295 205
+		focusColor UI_FOCUS_COLOR
+		style 1
+		border 1
+		popup
+		onESC { close coop_popmenu ; open main }
+
+		itemDef
+		{
+			name window
+			rect 0 2 295 205
+			style WINDOW_STYLE_FILLED
+			border 1
+			bordercolor .5 .5 .5 .5
+			forecolor 1 1 1 1
+			backcolor 0 0 0 .5
+			visible 1
+			decoration
+		}
+		itemDef
+		{
+			name backimage2fade
+			style WINDOW_STYLE_SHADER
+			rect -176 -132 642 482
+			background "ui/assets/fadebox.tga"
+			forecolor 0 0 0 0.4
+			backcolor 0 0 0 0.4
+			visible 1
+			decoration
+		}
+		itemDef
+		{
+			name window2
+			rect 2 4 291 20
+			style WINDOW_STYLE_FILLED
+			border 1
+			bordercolor .1 .1 .1 .2
+			forecolor 1 1 1 1
+			backcolor 1 1 .3 .3
+			visible 1
+			decoration
+		}
+		itemDef
+		{
+			name title
+			text "Cooperativo - hasta 4 jugadores"
+			style 0
+			textscale .25
+			textstyle ITEM_TEXTSTYLE_NORMAL
+			rect 146 20 110 20
+			textalign 1
+			decoration
+			forecolor 1 1 1 1
+			visible 1
+		}
+
+		// crear: abre el puerto; despues se elige Nueva Partida o Cargar Partida como siempre
+		itemDef
+		{
+			name host
+			text "Crear partida"
+			type 1
+			textscale .35
+			style UI_BUTTON_STYLE
+			textstyle UI_BUTTON_TEXT_STYLE
+			rect 20 34 255 26
+			textalign 1
+			textalignx 127
+			textaligny 19
+			border UI_BUTTON_BORDER
+			bordercolor UI_BUTTON_BORDER_COLOR
+			forecolor UI_BUTTON_TEXT_COLOR
+			backcolor UI_BUTTON_BACK_COLOR
+			visible 1
+			action { play "mouse_click"; exec "coophost"; }
+			mouseEnter { setitemcolor host backcolor UI_BUTTON_BACK_COLOR_HOVER play "mouse_over" }
+			mouseExit { setitemcolor host backcolor UI_BUTTON_BACK_COLOR }
+		}
+
+		// unirse: IP del anfitrion (cvar coop_ip; coopjoin sin argumento la usa)
+		itemDef
+		{
+			name ip
+			type ITEM_TYPE_EDITFIELD
+			text "IP del anfitrión: "
+			cvar "coop_ip"
+			maxChars 40
+			maxPaintChars 20
+			rect 20 76 255 20
+			style WINDOW_STYLE_FILLED
+			textalign ITEM_ALIGN_LEFT
+			textalignx 4
+			textaligny 15
+			textscale .25
+			backcolor 0 0 0 .4
+			forecolor 1 1 1 1
+			visible 1
+			action { play "mouse_click"; }
+		}
+		itemDef
+		{
+			name join
+			text "Unirse"
+			type 1
+			textscale .35
+			style UI_BUTTON_STYLE
+			textstyle UI_BUTTON_TEXT_STYLE
+			rect 20 104 120 26
+			textalign 1
+			textalignx 59
+			textaligny 19
+			border UI_BUTTON_BORDER
+			bordercolor UI_BUTTON_BORDER_COLOR
+			forecolor UI_BUTTON_TEXT_COLOR
+			backcolor UI_BUTTON_BACK_COLOR
+			visible 1
+			action { play "mouse_click"; exec "coopjoin"; }
+			mouseEnter { setitemcolor join backcolor UI_BUTTON_BACK_COLOR_HOVER play "mouse_over" }
+			mouseExit { setitemcolor join backcolor UI_BUTTON_BACK_COLOR }
+		}
+		itemDef
+		{
+			name back
+			text "Volver"
+			type 1
+			textscale .35
+			style UI_BUTTON_STYLE
+			textstyle UI_BUTTON_TEXT_STYLE
+			rect 155 104 120 26
+			textalign 1
+			textalignx 59
+			textaligny 19
+			border UI_BUTTON_BORDER
+			bordercolor UI_BUTTON_BORDER_COLOR
+			forecolor UI_BUTTON_TEXT_COLOR
+			backcolor UI_BUTTON_BACK_COLOR
+			visible 1
+			action { play "mouse_click"; close coop_popmenu; open main; }
+			mouseEnter { setitemcolor back backcolor UI_BUTTON_BACK_COLOR_HOVER play "mouse_over" }
+			mouseExit { setitemcolor back backcolor UI_BUTTON_BACK_COLOR }
+		}
+
+		// estado (lo escribe el mod en ui_coop_status)
+		itemDef
+		{
+			name status
+			rect 20 140 255 60
+			type ITEM_TYPE_TEXT
+			style 1
+			textstyle 3
+			autowrapped
+			cvar "ui_coop_status"
+			textalign ITEM_ALIGN_CENTER
+			textalignx 127
+			textaligny 12
+			textscale .22
+			forecolor 1 1 .6 1
+			visible 1
+			decoration
+		}
+	}

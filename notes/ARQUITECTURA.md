@@ -161,6 +161,17 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   La carga de un checkpoint no muestra esa pantalla en el host (la carga de partida deja cl_paused 0).
 - tools\mem.py <pid> <dir> | s:<dir> | cv:<dir>: lee memoria de un juego abierto. En PowerShell `rd` es borrar.
 
+## Menu "Cooperativo"
+- El juego solo carga pk3 que empiezan con "pak" (orden: pakb > ... > pak0 > carpeta > localized_*): el menu
+  modificado va en game\Main\pakz_coop.pk3 y le gana a localized_spanish_pak0.pk3 (que tiene ui/main.menu).
+- tools\make_ui.py (lo corre build.bat) toma ui/main.menu del juego, inserta ui/coop_button.menu antes de
+  "Opciones", corre la columna de abajo (35 -> 30 px) y agrega ui/coop_popmenu.menu. En el repo solo van los
+  agregados. Texto en Latin-1 (el script convierte desde UTF-8).
+- La ventana usa cvars: coop_ip (campo de texto; coopjoin sin argumento la usa) y ui_coop_status (estado que
+  escribe el mod con CoopStatus).
+- El cursor de los menus se mueve con deltas (UI vmMain 4), no con la posicion del clic de Windows: para
+  probar sin mouse, `coopuiclick <x> <y>` (vmMain 4 y 3 con K_MOUSE1 = 200).
+
 ## Vehiculos (tarea 2.7)
 - playerlinkto(veh, "tag_player", frac) (carride/truckride) y la entrada al tanque (useby -> 0x2003dfc0, que
   llama 0x44ce0 -> G_EntLinkTo) enganchan al jugador: gentity+0x294 = {padre, hermano, tag SL u16, hueso,

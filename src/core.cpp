@@ -25,6 +25,17 @@ void Log(const char* fmt, ...)
     if (g_api) g_api->logLine(b);
 }
 
+// linea de estado de la ventana "Cooperativo" del menu (ui/coop_popmenu.menu la muestra)
+void CoopStatus(const char* fmt, ...)
+{
+    char b[256];
+    va_list a;
+    va_start(a, fmt);
+    vsnprintf(b, sizeof b, fmt, a);
+    va_end(a);
+    g::Cvar_Set("ui_coop_status", b);
+}
+
 // VM_Call 0x44f270: EAX = vm, 13 argumentos en la pila (ver game.h GameCall)
 asm(R"(
 .intel_syntax noprefix
@@ -1223,6 +1234,15 @@ constexpr float REVIVE_DIST = 80, REVIVE_SECONDS = 3;
 
 // prueba: coopendlevel <mapa> -> como missionSuccess("<mapa>") del script: pantalla de victoria y despues spmap
 // (gamex86: +0x2dbd18 mapa siguiente, +0x2dbd08 con pantalla de victoria, +0x2dbd00 pedido de salida)
+// prueba: coopuiclick <x> <y> -> lleva el cursor de los menus a (x, y) de 640x480 y hace clic, sin tocar el mouse
+// real (UI vmMain 4 = mover el cursor dx dy, 3 = tecla; K_MOUSE1 = 200 segun la tabla de nombres de teclas)
+void Cmd_CoopUiClick()
+{
+    if (!g::uivm) return;
+    int moves[][13] = {{4, -2000, -2000}, {4, atoi(g::Argv(1)), atoi(g::Argv(2))}, {3, 200, 1}, {3, 200, 0}};
+    for (auto& m : moves) g::CallVM(g::uivm, m);
+}
+
 void Cmd_CoopEndLevel()
 {
     uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
@@ -1620,6 +1640,7 @@ void JoinerControl(uint8_t type, Reader r)
         break;
     case M_FULL:
         g::Com_Printf("^1COOP: el host esta lleno (4 jugadores)\n");
+        CoopStatus("El anfitri\xf3n ya tiene 4 jugadores.");
         S->role = NONE;
         break;
     case M_MAP: {  // el host esta en otro mapa: cargarlo y volver a pedir lugar
@@ -1630,6 +1651,7 @@ void JoinerControl(uint8_t type, Reader r)
         S->role = NONE;  // hasta cooprejoin
         Log("joiner: el host esta en %s, lo cargo y vuelvo a entrar", map);
         g::Com_Printf("^3COOP: el host est\xe1 en %s, cargando...\n", map);
+        CoopStatus("Anfitri\xf3n encontrado: cargando %s...", map);
         char cmd[128];
         snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", map);
         g::Cbuf_AddText(cmd);
@@ -1708,20 +1730,26 @@ void Cmd_CoopHost()
     int port = g::cmd_argc > 1 ? atoi(g::Argv(1)) : 28960;
     if (!OpenSocket(port)) {
         g::Com_Printf("^1COOP: no se pudo abrir el puerto UDP %d\n", port);
+        CoopStatus("No se pudo abrir el puerto UDP %d (otro programa lo usa?)", port);
         return;
     }
     S->role = HOST;
     g::Com_Printf("^2COOP: host listo en el puerto %d. Los demas: coopjoin <tu ip>\n", port);
+    CoopStatus("Anfitri\xf3n listo (puerto UDP %d). Ahora eleg\xed Nueva Partida o Cargar Partida; "
+               "los dem\xe1s se unen con tu IP.", port);
 }
 
+// coopjoin <ip>[:puerto]; sin argumento usa la IP escrita en el menu Cooperativo (cvar coop_ip)
 void Cmd_CoopJoin()
 {
-    if (g::cmd_argc < 2) {
+    const char* target = g::cmd_argc > 1 ? g::Argv(1) : g::CvarString("coop_ip");
+    if (!*target) {
         g::Com_Printf("uso: coopjoin <ip>[:puerto]\n");
+        CoopStatus("Escrib\xed la IP del anfitri\xf3n.");
         return;
     }
     char host[128];
-    strncpy(host, g::Argv(1), sizeof host - 1);
+    strncpy(host, target, sizeof host - 1);
     host[sizeof host - 1] = 0;
     int port = 28960;
     if (char* c = strchr(host, ':')) { *c = 0; port = atoi(c + 1); }
@@ -1731,6 +1759,7 @@ void Cmd_CoopJoin()
     if (!OpenSocket(0)) return;
     if (getaddrinfo(host, nullptr, &hints, &res) != 0 || !res) {
         g::Com_Printf("^1COOP: no se encontro '%s'\n", host);
+        CoopStatus("No se encontr\xf3 '%s'.", host);
         return;
     }
     S->host = *(sockaddr_in*)res->ai_addr;
@@ -1741,6 +1770,8 @@ void Cmd_CoopJoin()
     S->hostMap[0] = 0;
     JoinerSendJoin();
     g::Com_Printf("COOP: uniendose a %s:%d...\n", host, port);
+    CoopStatus("Buscando al anfitri\xf3n en %s:%d... (tiene que haber elegido Crear partida y estar jugando)",
+               host, port);
 }
 
 // despues de recargar el mapa por M_RELOAD: volver a unirse al mismo host (lo reintenta cada 1 s)
@@ -2003,7 +2034,7 @@ const CmdDef kCmds[] = {
     {"coopdobj", Cmd_CoopDObj}, {"coopgod", Cmd_CoopGod},   {"cooplook", Cmd_CoopLook}, {"coopstate", Cmd_CoopState},
     {"coopbodydraw", Cmd_CoopBodyDraw}, {"coopanims", Cmd_CoopAnims}, {"coopcmd", Cmd_CoopCmd}, {"coopent", Cmd_CoopEnt},
     {"coophealth", Cmd_CoopHealth}, {"coopkill", Cmd_CoopKill}, {"cooplists", Cmd_CoopLists},
-    {"cooprejoin", Cmd_CoopRejoin}, {"coopendlevel", Cmd_CoopEndLevel}, {"coopweapons", Cmd_CoopWeapons},
+    {"cooprejoin", Cmd_CoopRejoin}, {"coopendlevel", Cmd_CoopEndLevel}, {"coopweapons", Cmd_CoopWeapons}, {"coopuiclick", Cmd_CoopUiClick},
 };
 
 }  // namespace
