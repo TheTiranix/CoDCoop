@@ -1,6 +1,7 @@
 # Pruebas con 2 juegos en la copia de desarrollo.
 #   .\run.ps1 host [mapa]        abre el host (devmap + coophost)
 #   .\run.ps1 join [mapa]        abre el que se une (devmap + coopjoin 127.0.0.1)
+#   .\run.ps1 joinmenu           abre el que se une en el menu principal (sin mapa)
 #   .\run.ps1 cmd host|join "<comando de consola>"
 #   .\run.ps1 shot <salida.png>  captura de pantalla completa
 #   .\run.ps1 kill               cierra solo los juegos de D:\CoDCoop
@@ -16,6 +17,12 @@ switch ($What) {
   'join' {
     Remove-Item "$game\__CoDSP" -Force -ErrorAction SilentlyContinue
     $args = "+set fs_homepath D:\CoDCoop\run\join +set r_fullscreen 0 +set r_mode 3 +set com_introplayed 1 +set logfile 2 +set sv_cheats 1 +devmap $A1 +coopjoin 127.0.0.1"
+    (Start-Process "$game\CoDSP.exe" -WorkingDirectory $game -ArgumentList $args -PassThru).Id
+  }
+  'joinmenu' {  # el que se une queda en el menu principal; despues: cmd join "coopjoin 127.0.0.1"
+    # (+coopjoin sin ip solo muestra el uso, pero hace que use codcoop_join.log/.cmd)
+    Remove-Item "$game\__CoDSP" -Force -ErrorAction SilentlyContinue
+    $args = "+set fs_homepath D:\CoDCoop\run\join +set r_fullscreen 0 +set r_mode 3 +set com_introplayed 1 +set logfile 2 +set sv_cheats 1 +coopjoin"
     (Start-Process "$game\CoDSP.exe" -WorkingDirectory $game -ArgumentList $args -PassThru).Id
   }
   'cmd' {
