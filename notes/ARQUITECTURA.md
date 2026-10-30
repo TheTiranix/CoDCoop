@@ -97,6 +97,27 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   el arbol (DObjFree 0x477020 lee dobj->tree->anims).
 - Com_SyncClientDObjs (0x431150) lo dispara un trap del juego: en el que se une hay que llamarlo a mano.
 
+## Cuerpos de los jugadores (fase 1, tareas 1.2 y 1.3)
+- El host crea un DObj de paracaidista (cuerpo + cabeza + casco) en la entidad de cada jugador cuando hay
+  algun remoto. El cgame no dibuja eType 1 (jugador): se engancha cgvm->systemCall (primer campo del vm_t,
+  `*(0x14bd620)`, original 0x401a50) y el trap 0xf8 devuelve para los OTROS jugadores una copia con eType 0
+  (general, dibuja el DObj) y sin pitch. Se rearma cada frame (el motor recrea el cgame) y se saca al descargar.
+- Cada modelo de un DObj lleva en +0x38 `-(indice de modelo)` (configstrings CS_MODELS = 31, 256 modelos): sin
+  eso el renderer no lo dibuja. Com_ServerDObjCreate resuelve solo el hueso padre si se le pasa el tag.
+- entityState: +0 eType (byte), +6 number, +0x10 eFlags, +0x14 pos (trType 3 = LINEAR_STOP, +0x20 trBase),
+  +0x38 apos (+0x44 pitch, +0x48 yaw). cg_entities 0x3012adc0 (0x178 c/u, +0x150 lerpOrigin).
+- XAnimInfo (pool 0xa6d000, 0x44 c/u): cliente +0x1c tiempo, +0x24 ciclo, +0x28 goalTime, +0x2c goalWeight,
+  +0x30 weight, +0x34 rate; servidor +0x38 tiempo nuevo, +0x3c tiempo confirmado, +0x40/+0x42 ciclos,
+  +0x44.. igual que el cliente. inGameCall (0xa8f648) elige el lado.
+- TRAMPA: el motor saltea las entidades 0..3 en la copia servidor->cliente por snapshot (0x44d8e0 empieza en
+  serverObjMap+8) y en la confirmacion del tiempo: para los cuerpos se hace a mano cada frame
+  (0x47b010 con el arbol en 0xa6d008; +0x3c = +0x38).
+- Animar: 0x47d8b0 (ECX arbol, EAX anim; goalWeight, blendTime, rate, 0, 0, 0) y 0x47ccd0 (ECX DObj; dtime,
+  notify) con inGameCall = 1. Sin mezcla: se apagan todos los nodos y se enciende la cadena nueva.
+- Postura: ps.pm_flags (+0xc) 1 = cuerpo a tierra, 2 = agachado. Comando `coopanims <texto>` lista las hojas.
+- El inicio de pathfinder deja al jugador en z=2370 con pm_type 1 (paracaidas) unos segundos: no mover jugadores
+  con coopbring/cooplook antes de que aterrice (quedan flotando fuera del mapa, sin cielo).
+
 ## Estado
 - Tramo 1 FUNCIONA (2026-10-29, probado con 2 juegos en esta PC): el 2do jugador se conecta al slot 1,
   ve el mundo desde su posicion con los snapshots del host y camina (el host lo mueve con sus usercmds).

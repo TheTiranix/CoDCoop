@@ -20,7 +20,9 @@ switch ($What) {
   }
   'cmd' {
     $f = if ($A1 -eq 'join') { "$game\codcoop_join.cmd" } else { "$game\codcoop.cmd" }
+    for ($i = 0; $i -lt 30 -and (Test-Path $f); $i++) { Start-Sleep -Milliseconds 100 }  # que lea el anterior
     Set-Content -Path $f -Value $A2 -Encoding ascii -NoNewline
+    for ($i = 0; $i -lt 30 -and (Test-Path $f); $i++) { Start-Sleep -Milliseconds 50 }   # y este
   }
   'shot' {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing

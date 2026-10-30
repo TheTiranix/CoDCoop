@@ -67,7 +67,7 @@ struct Remote {
 
 // Todo lo que tiene que sobrevivir a una recarga del nucleo. La memoria la guarda ddraw.dll; si cambia
 // el tamaño o STATE_VERSION, el cargador la pone en cero (se pierde la conexion).
-constexpr uint32_t STATE_VERSION = 1;
+constexpr uint32_t STATE_VERSION = 2;
 struct State {
     int role;
     SOCKET sock;
@@ -80,9 +80,17 @@ struct State {
     int frozenTime;
     char hostMap[64];
     uint8_t* ownTree[g::MAX_GENTITIES];  // arboles de animacion creados por nosotros
+    uint8_t* bodyTree[g::MAX_CLIENTS];   // host: arbol del cuerpo del jugador n (0 = sin cuerpo)
     char cs[g::MAX_CONFIGSTRINGS][1024];
 };
 State* S;
+
+struct ModelEntry {  // lo que recibe Com_ServerDObjCreate (0x476e00 resuelve tag -> hueso padre)
+    void* model;
+    const char* tag;
+    uint16_t flags;
+    uint16_t pad;
+};
 
 // diagnostico: contadores que se vuelcan al log cada 5 s
 int g_statSnaps, g_statEnts, g_statRecv, g_statCtrl;
@@ -452,12 +460,7 @@ uint8_t* FindXAnim(const char* name)
 
 void JoinerApplyDObj(Reader r)
 {
-    struct ModelEntry {
-        void* model;
-        const char* tag;
-        uint16_t flags;
-        uint16_t pad;
-    } models[8] = {};
+    ModelEntry models[8] = {};
     uint8_t parents[8];
     char name[256], animName[256];
     int e = r.Get<uint16_t>(), nm = r.Get<uint8_t>(), u12 = r.Get<uint16_t>();
@@ -535,6 +538,261 @@ void JoinerApplyAnims(Reader r)
             }
         }
     }
+}
+
+// ---------- cuerpos de los jugadores (el SP no tiene: el jugador nunca se ve a si mismo) ----------
+
+// host: DObj de soldado aliado para la entidad del jugador n. Los modelos salen de character/Airborne*.gsc
+// (cuerpo + cabeza + casco, unidos al esqueleto del cuerpo). shortcut: siempre paracaidista de EE.UU.,
+// falta elegir britanico/sovietico segun la campaña (fase 5).
+// Indice de modelo (configstrings CS_MODELS 31..286) que el cliente usa para encontrar el modelo de dibujo
+// de cada parte de un DObj (DObj+0x38 = -indice). Si el mapa no lo precargo, se registra en el primer
+// lugar libre (el G_ModelIndex del juego salta los ocupados).
+constexpr int CS_MODELS = 31, MAX_MODELS = 256;
+int ModelIndex(const char* name)
+{
+    char full[128];
+    snprintf(full, sizeof full, "xmodel/%s", name);
+    int empty = 0;
+    for (int i = 1; i < MAX_MODELS; ++i) {
+        const char* s = g::ConfigString(CS_MODELS + i);
+        if (!*s) {
+            if (!empty) empty = i;
+        } else if (!_stricmp(s, full)) {
+            return i;
+        }
+    }
+    if (!empty) return 0;
+    g::SV_SetConfigstring(CS_MODELS + empty, full);
+    Log("modelo %s registrado en el indice %d", full, empty);
+    return empty;
+}
+
+void HostCreateBody(int n)
+{
+    static const char* const kParts[g::MAX_CLIENTS][3] = {
+        {"character_airborne", "basehead4_04", "gear_US_helmet"},
+        {"character_airborne", "basehead_01", "gear_US_helmet_net"},
+        {"character_airborne_101", "basehead2_02", "gear_US_helmet"},
+        {"character_airborneslvup", "basehead3_03", "gear_US_helmet_scrim"},
+    };
+    ModelEntry models[3] = {};
+    for (int k = 0; k < 3; ++k) {
+        models[k].model = g::XModelPrecache(kParts[n][k]);
+        int index = ModelIndex(kParts[n][k]);
+        if (!models[k].model || !index) {
+            Log("cuerpo %d: falta el modelo %s", n, kParts[n][k]);
+            return;
+        }
+        models[k].flags = (uint16_t)-index;
+    }
+    uint8_t* xanim = FindXAnim("generic_human.atr");
+    uint8_t* tree = xanim ? g::XAnimCreateTree(xanim) : nullptr;
+    g::Com_ServerDObjCreate(models, 3, tree, n, 0);
+    S->bodyTree[n] = tree;
+    Log("cuerpo %d: creado (arbol %p)", n, tree);
+}
+
+void HostFreeBody(int n)
+{
+    uint8_t* tree = S->bodyTree[n];
+    S->bodyTree[n] = nullptr;
+    if (g::serverObjMap[n]) g::Com_ServerDObjFree(n);
+    g::Com_SyncClientDObjs();
+    if (tree) {
+        FreeTreeInfos(tree);
+        g::XAnimFreeTree(tree);
+    }
+    Log("cuerpo %d: borrado", n);
+}
+
+bool g_bodyDraw = true;  // prueba: coopbodydraw 0 -> sin cuerpos, los jugadores como en el SP
+void Cmd_CoopBodyDraw()
+{
+    g_bodyDraw = atoi(g::Argv(1)) != 0;
+}
+
+// Con algun remoto conectado cada jugador tiene cuerpo; solo, como en el SP.
+void HostUpdateBodies()
+{
+    if (!g::svs_clients) return;
+    bool anyRemote = false;
+    for (int n = 1; n < g::MAX_CLIENTS; ++n) anyRemote |= S->remote[n].active;
+    for (int n = 0; n < g::MAX_CLIENTS; ++n) {
+        bool want = g_bodyDraw && anyRemote && *(int*)(g::Client(n) + g::CL_STATE) == 1;
+        bool has = S->bodyTree[n] != nullptr;
+        if (has && (!want || !g::serverObjMap[n])) HostFreeBody(n);  // tambien si el juego borro el DObj
+        if (want && !S->bodyTree[n] && !g::serverObjMap[n]) HostCreateBody(n);
+    }
+}
+
+}  // namespace
+
+// cgame (host y remoto): el trap 0xf8 devuelve el entityState de la memoria del servidor. Los jugadores
+// (eType 1) no se dibujan; a los demas jugadores con cuerpo se los da como entidad general (eType 0), que
+// dibuja su DObj, y sin inclinacion (los angulos son los de la vista).
+extern "C" uint8_t* CgEntityState(const int* args)
+{
+    static uint8_t copy[g::MAX_CLIENTS][g::ENTSTATE_SIZE];
+    int e = args[1];
+    uint8_t* st = g::Entity(e);
+    int self = S->role == JOINER ? S->slot : 0;
+    if (!g_bodyDraw || S->role == NONE || e < 0 || e >= g::MAX_CLIENTS || e == self || st[0] != 1 || !g::serverObjMap[e]) return st;
+    uint8_t* c = copy[e];
+    memcpy(c, st, g::ENTSTATE_SIZE);
+    c[0] = 0;
+    *(float*)(c + 0x44) = 0;  // apos.trBase: pitch y roll
+    *(float*)(c + 0x4c) = 0;
+    return c;
+}
+
+// XAnim del lado servidor (el lado lo elige inGameCall): las mismas funciones que usa el juego para la IA.
+//   BodyAnimKnob: 0x47d8b0 (ECX arbol, EAX anim; goalWeight, blendTime, rate, notify x3) pone la animacion
+//                 con su cadena de padres y apaga las hermanas.
+//   BodyAnimUpdate: 0x47ccd0 (ECX DObj; dtime, notify) avanza el tiempo.
+asm(R"(
+.intel_syntax noprefix
+.globl _BodyAnimKnob
+_BodyAnimKnob:
+    mov ecx, [esp+4]
+    mov eax, [esp+8]
+    push 0
+    push 0
+    push 0
+    push dword ptr [esp+0x20]
+    push dword ptr [esp+0x20]
+    push dword ptr [esp+0x20]
+    mov edx, 0x47d8b0
+    call edx
+    add esp, 24
+    ret
+.globl _BodyAnimUpdate
+_BodyAnimUpdate:
+    mov ecx, [esp+4]
+    push 0
+    push dword ptr [esp+0xc]
+    mov eax, 0x47ccd0
+    call eax
+    add esp, 8
+    ret
+.att_syntax
+)");
+extern "C" void BodyAnimKnob(uint8_t* tree, int anim, float goalWeight, float blendTime, float rate);
+extern "C" void BodyAnimUpdate(uint8_t* dobj, float dtime);
+
+asm(R"(
+.intel_syntax noprefix
+.globl _CgSyscallHook
+_CgSyscallHook:
+    mov eax, [esp+4]
+    cmp dword ptr [eax], 0xf8
+    jne 1f
+    push eax
+    call _CgEntityState
+    add esp, 4
+    ret
+1:  mov eax, 0x401a50
+    jmp eax
+.att_syntax
+)");
+extern "C" void CgSyscallHook();
+
+namespace {
+
+// cgvm->systemCall (primer campo del vm_t) se rearma cada vez que el motor recrea el cgame
+constexpr uintptr_t CL_CGAME_SYSCALLS = 0x401a50;
+void HookCgame(bool on)
+{
+    void** vm = *(void***)0x14bd620;
+    if (!vm) return;
+    if (on && *vm == (void*)CL_CGAME_SYSCALLS) *vm = (void*)CgSyscallHook;
+    if (!on && *vm == (void*)CgSyscallHook) *vm = (void*)CL_CGAME_SYSCALLS;
+}
+
+// ---------- animacion de los cuerpos (1.3) ----------
+
+enum BodyAnim { BA_IDLE, BA_WALK, BA_RUN, BA_BACK, BA_LEFT, BA_RIGHT, BA_CROUCH, BA_CROUCHWALK, BA_CROUCHRUN, BA_PRONE,
+                BA_CRAWL, BA_DEATH, BA_COUNT };
+const char* const kBodyAnimName[BA_COUNT] = {
+    "stand_aim_straight", "stand_walk_combat_loop_01", "combatrun_forward_1", "combatrun_back",
+    "combatrun_left",     "combatrun_right",           "crouch_aim_straight", "crouchwalk_loop",
+    "crouchrun_loop_forward_1", "prone_aim_idle",      "prone_crawl",         "death_stand_dropinplace",
+};
+
+int AnimIndex(uint8_t* xanim, const char* name)
+{
+    int size = *(int*)(xanim + 4);
+    for (int i = 0; i < size; ++i) {
+        uint8_t* node = xanim + 8 + i * 8;
+        uint8_t* parts = *(uint16_t*)node ? nullptr : *(uint8_t**)(node + 4);
+        if (parts && !_stricmp(SafeStr(*(char**)parts), name)) return i;
+    }
+    return -1;
+}
+
+// Postura (ps.pm_flags: 1 cuerpo a tierra, 2 agachado), vida y velocidad del jugador -> animacion
+int ChooseBodyAnim(int n)
+{
+    uint8_t* ps = *(uint8_t**)0x152bc64 + n * *(int*)0x152bc68;
+    const float* v = (const float*)(ps + 0x20);
+    float speed = sqrtf(v[0] * v[0] + v[1] * v[1]);
+    int flags = *(int*)(ps + 0xc);
+    if (*(int*)(ps + 0xe4) <= 0) return BA_DEATH;
+    if (flags & 1) return speed > 5 ? BA_CRAWL : BA_PRONE;
+    if (flags & 2) return speed < 5 ? BA_CROUCH : speed < 100 ? BA_CROUCHWALK : BA_CROUCHRUN;
+    if (speed < 5) return BA_IDLE;
+    float yaw = *(const float*)(g::Entity(n) + 0x48);  // apos.trBase[YAW]
+    float rel = atan2f(v[1], v[0]) * 180.0f / 3.14159265f - yaw;
+    rel -= 360.0f * floorf((rel + 180.0f) / 360.0f);  // a [-180, 180)
+    if (fabsf(rel) <= 50) return speed < 120 ? BA_WALK : BA_RUN;
+    if (fabsf(rel) >= 130) return BA_BACK;
+    return rel > 0 ? BA_LEFT : BA_RIGHT;
+}
+
+int g_bodyAnim[g::MAX_CLIENTS] = {-1, -1, -1, -1};  // animacion puesta (-1 = ninguna; tras recargar se vuelve a poner)
+
+void HostAnimateBodies()
+{
+    static int lastTime;
+    int now = *(int*)0x152e930;  // sv.time
+    float dt = (now - lastTime) / 1000.0f;
+    lastTime = now;
+    if (dt < 0 || dt > 0.2f) dt = 0;
+    uint8_t* xanim = FindXAnim("generic_human.atr");
+    if (!xanim) return;
+    int prevSide = g::inGameCall;
+    g::inGameCall = 1;  // lado servidor; el cliente lo copia en cada snapshot (0x47b010)
+    for (int n = 0; n < g::MAX_CLIENTS; ++n) {
+        uint8_t* d = g::ServerDObj(n);
+        uint8_t* tree = S->bodyTree[n];
+        if (!tree || !d || *(uint8_t**)d != tree) { g_bodyAnim[n] = -1; continue; }
+        int want = ChooseBodyAnim(n);
+        int size = *(int*)(xanim + 4);
+        if (want != g_bodyAnim[n]) {
+            // el knob solo apaga las hermanas de la hoja: se apaga todo y se enciende la cadena nueva
+            for (int a = 1; a < size; ++a)
+                if (uint16_t idx = *(uint16_t*)(tree + 8 + a * 2)) {
+                    uint8_t* info = g::xanimInfo + idx * 0x44;
+                    *(float*)(info + 0x44) = *(float*)(info + 0x48) = *(float*)(info + 0x4c) = 0;
+                }
+            int index = AnimIndex(xanim, kBodyAnimName[want]);
+            // shortcut: sin mezcla (blendTime 0); 0x47ccd0 sin notify no lleva el peso hacia la meta
+            if (index > 0) BodyAnimKnob(tree, index, 1.0f, 0.0f, 1.0f);
+            else Log("cuerpo %d: no esta la animacion %s", n, kBodyAnimName[want]);
+            g_bodyAnim[n] = want;
+        }
+        BodyAnimUpdate(d, dt);
+        // 0x47ba90 deja el tiempo nuevo en +0x38 (ciclo +0x40) calculado desde el confirmado +0x3c (+0x42); el
+        // servidor lo confirma despues, pero tambien solo desde la entidad 4
+        for (int a = 0; a < size; ++a)
+            if (uint16_t idx = *(uint16_t*)(tree + 8 + a * 2)) {
+                uint8_t* info = g::xanimInfo + idx * 0x44;
+                *(float*)(info + 0x3c) = *(float*)(info + 0x38);
+                *(uint16_t*)(info + 0x42) = *(uint16_t*)(info + 0x40);
+            }
+        g::XAnimCloneServerToClient(tree);  // 0x44d8e0 lo hace por snapshot pero desde la entidad 4
+    }
+    g::inGameCall = prevSide;
 }
 
 // ---------- joiner ----------
@@ -737,7 +995,8 @@ void Cmd_CoopDObj()
         int nm = d[0x16];
         for (int i = 0; i < nm && i < 8; ++i) {
             uint8_t* m = *(uint8_t**)(d + 0x18 + i * 4);
-            len += snprintf(models + len, sizeof models - len, " %s(p%d)", m ? SafeStr(*(char**)m) : "null", d[0x48 + i]);
+            len += snprintf(models + len, sizeof models - len, " %s(p%d f%x o%d)", m ? SafeStr(*(char**)m) : "null", d[0x48 + i],
+                            *(uint16_t*)(d + 0x38 + i * 2), d[0x50 + i]);
         }
         uint8_t* tree = *(uint8_t**)d;
         int active = 0, size = 0;
@@ -750,8 +1009,16 @@ void Cmd_CoopDObj()
                 if (*(uint16_t*)(tree + 8 + i * 2)) ++active;
         }
         const float* org = (const float*)(g::Entity(e) + 0xe0);  // r.currentOrigin
-        Log("dobj ent %d (%.0f %.0f %.0f): modelos %d:%s arbol %p anims '%s' n=%d activos=%d", e, org[0], org[1], org[2], nm,
-            models, tree, animName, size, active);
+        Log("dobj ent %d (%.0f %.0f %.0f): modelos %d:%s arbol %p anims '%s' n=%d activos=%d u12=%d", e, org[0], org[1], org[2],
+            nm, models, tree, animName, size, active, *(uint16_t*)(d + 0x12));
+        // estado de cada nodo activo: cliente (tiempo, goalTime, goalWeight, weight, rate) / servidor (lo mismo)
+        for (int i = 0; tree && e < g::MAX_CLIENTS && i < size; ++i) {
+            uint16_t idx = *(uint16_t*)(tree + 8 + i * 2);
+            if (!idx) continue;
+            const float* f = (const float*)(g::xanimInfo + idx * 0x44);
+            Log("  nodo %d: cli t=%.2f %.2f gt=%.2f gw=%.2f w=%.2f r=%.2f | srv t=%.2f %.2f gt=%.2f gw=%.2f w=%.2f r=%.2f", i, f[7],
+                f[8], f[10], f[11], f[12], f[13], f[14], f[15], f[17], f[18], f[19], f[20]);
+        }
         ++shown;
     }
     Log("dobj: %d infos de animacion en uso", *(int*)0xa6d000);
@@ -790,13 +1057,58 @@ void Cmd_CoopLook()
     Log("cooplook %d -> ent %d en (%.0f %.0f %.0f), yaw %.0f", n, e, o[0], o[1], o[2], yaw);
 }
 
+// prueba: coopstate <ent> -> vuelca el entityState (0x9c bytes) como enteros y floats
+void Cmd_CoopState()
+{
+    int e = atoi(g::Argv(1));
+    if (e < 0 || e >= g::MAX_GENTITIES || !g::sv_gentities) return;
+    const uint8_t* st = g::Entity(e);
+    const float* org = (const float*)(st + 0xe0);
+    Log("state %d (r.currentOrigin %.1f %.1f %.1f):", e, org[0], org[1], org[2]);
+    for (int i = 0; i < g::ENTSTATE_SIZE; i += 16) {
+        char line[256];
+        int len = snprintf(line, sizeof line, "  +%02x:", i);
+        for (int k = i; k < i + 16 && k < g::ENTSTATE_SIZE; k += 4)
+            len += snprintf(line + len, sizeof line - len, " %08x(%.1f)", *(const uint32_t*)(st + k), *(const float*)(st + k));
+        Log("%s", line);
+    }
+    // centity del cgame (cg_entities 0x3012adc0, 0x178 c/u): +0 currentState, +0x138 currentValid, +0x150 lerpOrigin
+    if (uint8_t* cg = (uint8_t*)GetModuleHandleA("cgamex86.dll")) {
+        const uint8_t* cent = cg + 0x12adc0 + e * 0x178;
+        const float* lo = (const float*)(cent + 0x150);
+        Log("cent %d: eType %d eFlags %x valid %d lerpOrigin (%.1f %.1f %.1f) lerpAngles (%.1f %.1f %.1f) dobjCliente %d", e,
+            cent[0], *(const int*)(cent + 0x10), *(const int*)(cent + 0x138), lo[0], lo[1], lo[2], lo[3], lo[4], lo[5],
+            ((const int16_t*)0x89fc88)[e]);
+    }
+}
+
+// prueba: coopanims <texto> -> hojas del arbol generic_human cuyo nombre contiene el texto.
+// XAnim: +0 nombre, +4 cantidad, +8 nodos de 8 bytes {u16 hijos, u16 padre, hoja: XAnimParts* (nombre en +0)}
+void Cmd_CoopAnims()
+{
+    uint8_t* x = FindXAnim("generic_human.atr");
+    if (!x) return;
+    const char* filter = g::Argv(1);
+    int size = *(int*)(x + 4), shown = 0;
+    for (int i = 0; i < size && shown < 200; ++i) {
+        uint8_t* node = x + 8 + i * 8;
+        if (*(uint16_t*)node) continue;  // no es hoja
+        uint8_t* parts = *(uint8_t**)(node + 4);
+        const char* name = parts ? SafeStr(*(char**)parts) : "?";
+        if (*filter && !strstr(name, filter)) continue;
+        Log("anim %d (padre %d): %s", i, *(uint16_t*)(node + 2), name);
+        ++shown;
+    }
+}
+
 struct CmdDef {
     const char* name;
     void (*fn)();
 };
 const CmdDef kCmds[] = {
     {"coophost", Cmd_CoopHost}, {"coopjoin", Cmd_CoopJoin}, {"coopinfo", Cmd_CoopInfo}, {"coopbring", Cmd_CoopBring},
-    {"coopdobj", Cmd_CoopDObj}, {"coopgod", Cmd_CoopGod},   {"cooplook", Cmd_CoopLook},
+    {"coopdobj", Cmd_CoopDObj}, {"coopgod", Cmd_CoopGod},   {"cooplook", Cmd_CoopLook}, {"coopstate", Cmd_CoopState},
+    {"coopbodydraw", Cmd_CoopBodyDraw}, {"coopanims", Cmd_CoopAnims},
 };
 
 }  // namespace
@@ -819,6 +1131,7 @@ EXPORT void Coop_Init(const CoreApi* api, void* state, int fresh)
 
 EXPORT void Coop_Shutdown()
 {
+    HookCgame(false);  // el puntero apunta a esta DLL, que se va a descargar
     Log("nucleo descargado");
     g_api = nullptr;
 }
@@ -884,6 +1197,9 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
 EXPORT void __cdecl Coop_HostFrame()
 {
     if (S->role != HOST) return;
+    HookCgame(true);
+    HostUpdateBodies();
+    HostAnimateBodies();
     uint8_t* gameClients = *(uint8_t**)0x152bc64;
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
         if (!S->god[n] || !gameClients || *(int*)(g::Client(n) + g::CL_STATE) != 1) continue;
@@ -909,6 +1225,7 @@ EXPORT void __cdecl Coop_HostFrame()
 EXPORT int __cdecl Coop_FrozenFrame(int msec)
 {
     if (!S->frozen) return 0;
+    HookCgame(true);
     int& t = S->frozenTime;
     int latest = *(int*)0x1426e68;  // cl.snap.serverTime
     int target = latest - 50;

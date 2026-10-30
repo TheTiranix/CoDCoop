@@ -120,6 +120,11 @@ inline uint8_t* XModelPrecache(const char* name)  // 0x4802f0: ECX = nombre sin 
                  : "edx", "memory");
     return r;
 }
+inline void XAnimCloneServerToClient(uint8_t* tree)  // 0x47b010(nodo 0) con el arbol en el global 0xa6d008
+{
+    *(uint8_t**)0xa6d008 = tree;
+    asm volatile("push $0\n\tcall *%0\n\tadd $4, %%esp" : : "r"((void*)0x47b010) : "eax", "ecx", "edx", "memory");
+}
 inline uint8_t* ServerDObj(int ent) { return serverObjMap[ent] ? dobjPool + serverObjMap[ent] * DOBJ_SIZE : nullptr; }
 
 inline uint8_t* Client(int n) { return svs_clients + n * CLIENT_SIZE; }
