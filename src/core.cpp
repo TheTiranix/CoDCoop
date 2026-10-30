@@ -1330,6 +1330,58 @@ void EntUnlink(uint8_t* fn, uint8_t* ent)
     asm volatile("call *%1" : "+S"(ent) : "r"(fn) : "eax", "ecx", "edx", "memory");
 }
 
+// Alcanzar al host (D2). Un remoto en pie a mas de CATCHUP_DIST del host durante CATCHUP_SECONDS aparece en el
+// rastro del host: los ultimos lugares donde piso (en el suelo, ps+0x54 groundEntityNum != 0x7ff), asi que
+// se puede estar ahi sin calcular colisiones. Los caidos no se mueven (hay que ir a buscarlos) y los que van en un
+// vehiculo siguen al host por HostVehicles.
+constexpr float CATCHUP_DIST = 2000, CATCHUP_SECONDS = 10;
+constexpr int TRAIL = 40;  // ultimos lugares del host, uno cada 32 unidades que se movio
+float g_trail[TRAIL][3];
+int g_trailCount, g_trailNext;
+float g_farTime[g::MAX_CLIENTS];
+
+float Dist2(const float* a, const float* b)
+{
+    float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+    return dx * dx + dy * dy + dz * dz;
+}
+
+void HostCatchUp(float dt)
+{
+    const float* host = (const float*)(PlayerState(0) + 0x14);
+    bool hostLinked = *(uint8_t**)(g::Entity(0) + 0x294);
+    const float* last = g_trailCount ? g_trail[(g_trailNext - 1 + TRAIL) % TRAIL] : nullptr;
+    if (!hostLinked && *(int*)(PlayerState(0) + 0x54) != 0x7ff && (!last || Dist2(last, host) > 32 * 32)) {
+        memcpy(g_trail[g_trailNext], host, 12);
+        g_trailNext = (g_trailNext + 1) % TRAIL;
+        g_trailCount += g_trailCount < TRAIL;
+    }
+    for (int n = 1; n < g::MAX_CLIENTS; ++n) {
+        float* o = (float*)(PlayerState(n) + 0x14);
+        bool distant = S->remote[n].active && PlayerInGame(n) && !S->downed[n] && !hostLinked &&
+                       !*(uint8_t**)(g::Entity(n) + 0x294) && Dist2(o, host) > CATCHUP_DIST * CATCHUP_DIST;
+        g_farTime[n] = distant ? g_farTime[n] + dt : 0;
+        if (g_farTime[n] < CATCHUP_SECONDS) continue;
+        // el punto mas nuevo del rastro que no quede encima del host ni de otro jugador
+        const float* spot = nullptr;
+        for (int k = 1; k <= g_trailCount && !spot; ++k) {
+            const float* p = g_trail[(g_trailNext - k + TRAIL) % TRAIL];
+            bool clear = Dist2(p, host) > 48 * 48;
+            for (int m = 1; m < g::MAX_CLIENTS && clear; ++m)
+                if (m != n && PlayerInGame(m)) clear = Dist2(p, (const float*)(PlayerState(m) + 0x14)) > 40 * 40;
+            if (clear) spot = p;
+        }
+        if (!spot) continue;  // el host no se movio todavia: se reintenta en el proximo frame
+        Log("jugador %d: lejos del host %.0f s, aparece en su rastro (%.0f %.0f %.0f)", n, g_farTime[n], spot[0],
+            spot[1], spot[2]);
+        memcpy(o, spot, 12);
+        memset(PlayerState(n) + 0x20, 0, 12);  // velocidad
+        memcpy(g::Entity(n) + 0xe0, spot, 12);  // r.currentOrigin
+        g_farTime[n] = 0;
+        SendBanner(n, "^3Te quedaste lejos: apareciste junto al anfitri\xf3n", false);
+    }
+}
+
 uint8_t* g_linkFailed[g::MAX_CLIENTS];
 uint8_t* g_weaponTried[g::MAX_CLIENTS];
 
@@ -2226,6 +2278,7 @@ EXPORT void __cdecl Coop_HostFrame()
     HostAnimateBodies(dt);
     HostDownedFrame(dt);
     HostVehicles();
+    if (CoopActive()) HostCatchUp(dt);
     uint8_t team = 0;  // quien esta en el mapa y donde (brujula de todos)
     float teamPos[g::MAX_CLIENTS][3] = {};
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {

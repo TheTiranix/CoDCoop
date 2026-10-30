@@ -169,6 +169,12 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
 - M_PING cada segundo en los dos sentidos: el remoto con su menu abierto no manda usercmds, y el host en pausa
   (victoria, "Haz clic para iniciar") no manda snapshots. El remoto sin noticias del host en 15 s vuelve al menu.
 
+## Alcanzar al host (tarea 2.6)
+- Rastro del host: sus ultimos 40 lugares en el suelo (ps+0x54 groundEntityNum != 0x7ff; 0x7fe = mundo), uno
+  cada 32 unidades que se mueve (por tiempo no sirve: quieto, el rastro se llena de su posicion actual).
+- Remoto en pie, sin vehiculo, a mas de 2000 unidades durante 10 s -> al punto mas nuevo del rastro que no
+  quede a menos de 48 del host ni de 40 de otro jugador (ps origen + velocidad 0 + r.currentOrigin).
+
 ## Menu "Cooperativo"
 - El juego solo carga pk3 que empiezan con "pak" (orden: pakb > ... > pak0 > carpeta > localized_*): el menu
   modificado va en game\Main\pakz_coop.pk3 y le gana a localized_spanish_pak0.pk3 (que tiene ui/main.menu).
