@@ -160,6 +160,22 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   cg_norender 0, cerrar menus). Se reconoce por cl_paused 1 + cg_norender 1. El remoto lo hace solo al entrar.
   La carga de un checkpoint no muestra esa pantalla en el host (la carga de partida deja cl_paused 0).
 - tools\mem.py <pid> <dir> | s:<dir> | cv:<dir>: lee memoria de un juego abierto. En PowerShell `rd` es borrar.
+
+## Cambios de mapa (tarea 3.2)
+- Fin de nivel del script: changelevel(map) / missionSuccess(map) (gamex86 0x200359b0 / 0x20035b00) guardan el
+  mapa siguiente en gamex86+0x2dbd18 y piden salida (+0x2dbd00; +0x2dbd08 = con pantalla de victoria). El frame
+  (0x2001e790) abre "victoryscreen" (su onOpen pone cl_paused 1; "Siguiente nivel" lo cierra) y despues
+  g_reloading 2 + "spmap <mapa>". g_reloading = tipo de salida: 1 mision fallida, 4 nivel terminado, 2 cargando.
+- SV_SpawnServer(mapa, x) = 0x44c1b0, unico llamador SV_Map_f en 0x448246 (call cambiado a Hook_SpawnServer):
+  antes del servidor nuevo el host suelta a los remotos con M_RELOAD <mapa>. Ellos hacen devmap + cooprejoin.
+- M_JOIN lleva el mapa del que entra; si no es el del host, el host contesta M_MAP <mapa> sin dar slot y el
+  remoto lo carga y vuelve (sirve tambien para unirse desde cualquier mapa). Respuesta vieja (ya esta en ese
+  mapa) se ignora: el host atiende pedidos en cola al terminar de cargar.
+- Con fin de nivel en curso el host SI se pausa (pantalla de victoria); el remoto ve la misma pantalla
+  (openvictoryscreen va a todos). Prueba: `coopendlevel <mapa>` en el host = missionSuccess.
+- TRAMPA: a mitad de partida XModelPrecache (0x4802f0) corta el juego con "model '%s' not precached" si el nivel
+  no cargo ese modelo. Los cuerpos usan solo modelos de CS_MODELS (precargados por el nivel): el preferido o el
+  primer character_airborne*/british*/soviet* + basehead* (no axis) + casco US si es paracaidista.
 - Pruebas: coophealth <n> <vida>, coopkill <n> [daño] (G_Damage del mundo con gvm como VM actual),
   coopcmd <n>, coopent <n>, cooplook <n> <ent> [dist] [pitch]; tools\stack.ps1 <pid> (pila de un proceso
   colgado), tools\peek.ps1 <pid> <dir> <bytes>; run.ps1 click <x> <y>.

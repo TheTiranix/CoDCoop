@@ -51,7 +51,7 @@ namespace {
 
 constexpr uint32_t CTRL = 0xFFFFFFFE;  // prefijo de nuestros paquetes; el motor usa -1 (sin conexion) o una secuencia
 enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CS = 'C', M_CSDONE = 'G', M_ENTS = 'E', M_DOBJ = 'D', M_ANIM = 'N',
-                 M_DOWNED = 'W', M_RELOAD = 'R' };
+                 M_DOWNED = 'W', M_RELOAD = 'R', M_MAP = 'M' };
 constexpr int ANIM_STATE = 22;  // estado cliente de un XAnimInfo: +0x1c(4) +0x24(2) +0x28..+0x37(16)
 constexpr int MAX_PACKET = 1400;
 
@@ -315,6 +315,14 @@ void HostJoin(const sockaddr_in& from, Reader r)
     if (g::sv_state != 2) return;  // sin partida no hay a donde unirse
     uint8_t* reloading = g::Cvar_FindVar("g_reloading");
     if (reloading && *(int*)(reloading + 0x20)) return;  // mision fallida: esperar a que cargue el checkpoint
+    const char* hostMap = g::CvarString("mapname");
+    const char* theirMap = r.p < r.end && memchr(r.p, 0, r.end - r.p) ? (const char*)r.p : nullptr;
+    if (theirMap && _stricmp(theirMap, hostMap) != 0) {  // que cargue el mapa del host y vuelva (sin ocupar slot)
+        Writer w(M_MAP);
+        w.Put(hostMap, (int)strlen(hostMap) + 1);
+        SendTo(from, w.buf, w.len);
+        return;
+    }
     int n = FindSlot(from);
     if (n < 0) {
         for (int i = 1; i < g::MAX_CLIENTS; ++i)
@@ -626,31 +634,36 @@ void JoinerApplyAnims(Reader r)
 
 // ---------- cuerpos de los jugadores (el SP no tiene: el jugador nunca se ve a si mismo) ----------
 
-// host: DObj de soldado aliado para la entidad del jugador n. Los modelos salen de character/Airborne*.gsc
-// (cuerpo + cabeza + casco, unidos al esqueleto del cuerpo). shortcut: siempre paracaidista de EE.UU.,
-// falta elegir britanico/sovietico segun la campaña (fase 5).
-// Indice de modelo (configstrings CS_MODELS 31..286) que el cliente usa para encontrar el modelo de dibujo
-// de cada parte de un DObj (DObj+0x38 = -indice). Si el mapa no lo precargo, se registra en el primer
-// lugar libre (el G_ModelIndex del juego salta los ocupados).
+// host: DObj de soldado aliado para la entidad del jugador n (cuerpo + cabeza + casco, unidos al esqueleto del
+// cuerpo, como en character/*.gsc).
+// Indice de modelo (configstrings CS_MODELS 31..286, "xmodel/<nombre>") que el cliente usa para encontrar el
+// modelo de dibujo de cada parte de un DObj (DObj+0x38 = -indice); 0 si el nivel no lo cargo. Solo sirven los
+// que el nivel cargo: a mitad de partida XModelPrecache corta el juego con "model '%s' not precached".
 constexpr int CS_MODELS = 31, MAX_MODELS = 256;
 int ModelIndex(const char* name)
 {
     char full[128];
     snprintf(full, sizeof full, "xmodel/%s", name);
-    int empty = 0;
-    for (int i = 1; i < MAX_MODELS; ++i) {
-        const char* s = g::ConfigString(CS_MODELS + i);
-        if (!*s) {
-            if (!empty) empty = i;
-        } else if (!_stricmp(s, full)) {
+    for (int i = 1; i < MAX_MODELS; ++i)
+        if (!_stricmp(g::ConfigString(CS_MODELS + i), full)) return i;
+    return 0;
+}
+
+// Indice del preferido si el nivel lo cargo; si no, del primer modelo cargado que empiece con alguno de los
+// prefijos (lista terminada en nullptr) y no contenga `exclude`. 0 si no hay.
+int LoadedModel(const char* preferred, const char* const* prefixes, const char* exclude = nullptr)
+{
+    if (int i = ModelIndex(preferred)) return i;
+    for (; *prefixes; ++prefixes)
+        for (int i = 1; i < MAX_MODELS; ++i) {
+            const char* s = g::ConfigString(CS_MODELS + i);
+            if (_strnicmp(s, "xmodel/", 7) || _strnicmp(s + 7, *prefixes, strlen(*prefixes))) continue;
+            if (exclude && strstr(s, exclude)) continue;
             return i;
         }
-    }
-    if (!empty) return 0;
-    g::SV_SetConfigstring(CS_MODELS + empty, full);
-    Log("modelo %s registrado en el indice %d", full, empty);
-    return empty;
+    return 0;
 }
+const char* ModelName(int index) { return g::ConfigString(CS_MODELS + index) + 7; }
 
 // Modelo del arma en la mano del jugador n: ps.weapon (+0xa0) -> WeaponDef (tabla en gamex86 RVA 0x125650,
 // ver giveweapon RVA 0x15020) -> worldModel (+0x188, "xmodel/..."). "" si no tiene arma.
@@ -662,11 +675,15 @@ const char* WeaponModelName(int n)
     if (!defs || weapon <= 0 || weapon >= 64 || !defs[weapon]) return "";
     const char* name = *(const char**)(defs[weapon] + 0x188);
     if (!name || IsBadReadPtr(name, 8)) return "";
-    return _strnicmp(name, "xmodel/", 7) == 0 ? name + 7 : name;
+    name = _strnicmp(name, "xmodel/", 7) == 0 ? name + 7 : name;
+    return ModelIndex(name) ? name : "";  // sin cargar no se puede poner en el cuerpo
 }
 
 int g_bodyAnim[g::MAX_CLIENTS] = {-1, -1, -1, -1};  // animacion puesta (-1 = ninguna; tras recargar se vuelve a poner)
+int g_bodyParts[g::MAX_CLIENTS];                     // modelos del cuerpo sin contar el arma
 
+// Partes: las preferidas de cada jugador si el nivel las cargo; si no, las de algun aliado del nivel (asi en las
+// misiones britanicas y sovieticas salen soldados de esa campaña). Sin cuerpo ni cabeza cargados no hay cuerpo.
 void HostCreateBody(int n)
 {
     g_bodyAnim[n] = -1;  // arbol nuevo (puede caer en la misma direccion que el viejo)
@@ -676,24 +693,37 @@ void HostCreateBody(int n)
         {"character_airborne_101", "basehead2_02", "gear_US_helmet"},
         {"character_airborneslvup", "basehead3_03", "gear_US_helmet_scrim"},
     };
-    const char* names[4] = {kParts[n][0], kParts[n][1], kParts[n][2], WeaponModelName(n)};
-    int count = names[3][0] ? 4 : 3;
-    ModelEntry models[4] = {};
-    for (int k = 0; k < count; ++k) {
-        models[k].model = g::XModelPrecache(names[k]);
-        int index = ModelIndex(names[k]);
-        if (!models[k].model || !index) {
-            Log("cuerpo %d: falta el modelo %s", n, names[k]);
-            return;
-        }
-        models[k].flags = (uint16_t)-index;
+    static const char* const kBodies[] = {"character_airborne", "character_british", "character_soviet", nullptr};
+    static const char* const kHeads[] = {"basehead", nullptr};
+    static const char* const kHelmets[] = {"gear_US_helmet", nullptr};
+    int parts[3] = {LoadedModel(kParts[n][0], kBodies), LoadedModel(kParts[n][1], kHeads, "axis"), 0};
+    if (!parts[0] || !parts[1]) {
+        static DWORD lastWarn;
+        if (GetTickCount() - lastWarn > 10000) Log("cuerpo %d: el nivel no cargo modelos de soldado aliado", n);
+        lastWarn = GetTickCount();
+        return;
     }
-    models[3].tag = "tag_weapon_right";
+    if (!_strnicmp(ModelName(parts[0]), "character_airborne", 18)) parts[2] = LoadedModel(kParts[n][2], kHelmets);
+    ModelEntry models[4] = {};
+    int count = 0;
+    for (int index : parts) {
+        if (!index) continue;
+        models[count].model = g::XModelPrecache(ModelName(index));
+        models[count++].flags = (uint16_t)-index;
+    }
+    g_bodyParts[n] = count;
+    const char* weapon = WeaponModelName(n);
+    if (*weapon) {
+        models[count].model = g::XModelPrecache(weapon);
+        models[count].tag = "tag_weapon_right";
+        models[count++].flags = (uint16_t)-ModelIndex(weapon);
+    }
     uint8_t* xanim = FindXAnim("generic_human.atr");
     uint8_t* tree = xanim ? g::XAnimCreateTree(xanim) : nullptr;
     g::Com_ServerDObjCreate(models, count, tree, n, 0);
     S->bodyTree[n] = tree;
-    Log("cuerpo %d: creado (arbol %p, arma '%s')", n, tree, names[3]);
+    Log("cuerpo %d: creado (%s + %s%s%s, arma '%s')", n, ModelName(parts[0]), ModelName(parts[1]), parts[2] ? " + " : "",
+        parts[2] ? ModelName(parts[2]) : "", weapon);
 }
 
 // el DObj del cuerpo tiene el arma que el jugador lleva en la mano?
@@ -702,8 +732,8 @@ bool BodyWeaponMatches(int n)
     uint8_t* d = g::ServerDObj(n);
     const char* want = WeaponModelName(n);
     if (!d) return true;
-    if (!want[0]) return d[0x16] == 3;
-    uint8_t* model = d[0x16] == 4 ? *(uint8_t**)(d + 0x18 + 3 * 4) : nullptr;
+    if (!want[0]) return d[0x16] == g_bodyParts[n];
+    uint8_t* model = d[0x16] == g_bodyParts[n] + 1 ? *(uint8_t**)(d + 0x18 + g_bodyParts[n] * 4) : nullptr;
     return model && !_stricmp(SafeStr(*(char**)model), want);
 }
 
@@ -1117,6 +1147,18 @@ namespace {
 // Levantar: un compañero en pie a menos de REVIVE_DIST manteniendo Usar REVIVE_SECONDS.
 constexpr float REVIVE_DIST = 80, REVIVE_SECONDS = 3;
 
+// prueba: coopendlevel <mapa> -> como missionSuccess("<mapa>") del script: pantalla de victoria y despues spmap
+// (gamex86: +0x2dbd18 mapa siguiente, +0x2dbd08 con pantalla de victoria, +0x2dbd00 pedido de salida)
+void Cmd_CoopEndLevel()
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    if (!game || S->role != HOST || g::cmd_argc < 2) return;
+    snprintf((char*)game + 0x2dbd18, 0x400, "%s", g::Argv(1));
+    *(int*)(game + 0x2dbd08) = 1;
+    *(int*)(game + 0x2dbd00) = 1;
+    Log("coopendlevel %s", g::Argv(1));
+}
+
 // prueba: coophealth <n> <vida>
 void Cmd_CoopHealth()
 {
@@ -1282,10 +1324,19 @@ void SkipUiPauseCheck(bool skip)
     if (*jnz != want && (*jnz == 0xEB || *jnz == 0x75)) hook::Write((uintptr_t)jnz, &want, 1);
 }
 
-// Host: con remotos conectados el menu no pausa (como en multijugador). La pantalla de inicio tras cargar si.
+// Fin de nivel en curso (changelevel / missionSuccess / missionFailed): ahi la pausa del SP vale (pantalla de
+// victoria). gamex86: +0x2dbd00 pedido de salida, +0x298cac tipo de salida, +0x2dbd18 mapa siguiente.
+bool LevelExiting()
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    return game && (*(int*)(game + 0x298cac) || *(int*)(game + 0x2dbd00));
+}
+
+// Host: con remotos conectados el menu no pausa (como en multijugador). La pantalla de inicio tras cargar y la de
+// fin de nivel si.
 void HostNoPause()
 {
-    bool on = CoopActive() && !PregameOpen();
+    bool on = CoopActive() && !PregameOpen() && !LevelExiting();
     SkipUiPauseCheck(on);
     if (on && *(int*)(g::cl_paused + 0x20)) {
         g::Cvar_Set("cl_paused", "0");
@@ -1305,14 +1356,11 @@ void JoinerSkipPregame()
     Log("joiner: pantalla de inicio salteada");
 }
 
-// Mision fallida (g_reloading 1): antes de que se cargue el checkpoint se sueltan los remotos y los cuerpos.
-// Si quedaran conectados, la carga les manda comandos que nadie confirma ("Reliable command buffer overflow");
-// los arboles se liberan ahora, mientras su memoria sigue siendo valida. Los remotos se vuelven a unir solos.
-void HostCheckReload()
+// Antes de que el host cargue un mapa (el checkpoint o uno nuevo) se sueltan los remotos y los cuerpos. Si quedaran
+// conectados, la carga les manda comandos que nadie confirma ("Reliable command buffer overflow"); los arboles se
+// liberan ahora, mientras su memoria sigue siendo valida. Los remotos cargan `map` y se vuelven a unir solos.
+void HostDropRemotes(const char* map)
 {
-    uint8_t* reloading = g::Cvar_FindVar("g_reloading");
-    if (!reloading || !*(int*)(reloading + 0x20) || !CoopActive()) return;
-    Log("host: mision fallida, se sueltan los remotos hasta que cargue el checkpoint");
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
         if (S->bodyTree[n]) HostFreeBody(n);
         S->downed[n] = false;
@@ -1320,10 +1368,43 @@ void HostCheckReload()
     for (int n = 1; n < g::MAX_CLIENTS; ++n) {
         if (!S->remote[n].active) continue;
         Writer w(M_RELOAD);
+        w.Put(map, (int)strlen(map) + 1);
         SendTo(S->remote[n].addr, w.buf, w.len);
         *(int*)(g::Client(n) + g::CL_STATE) = 0;
         S->remote[n].active = false;
     }
+}
+
+// g_reloading copia el tipo de salida del nivel (gamex86 0x2001e6b0): 1 = mision fallida (pantalla de "La mision
+// ha fracasado" hasta que carga el checkpoint), 4 = nivel terminado (pantalla de victoria), 2 = justo antes de
+// "spmap <siguiente>", 0x10 = otra salida. Aca solo el 1; el nivel siguiente lo atiende Hook_SpawnServer.
+void HostCheckReload()
+{
+    uint8_t* reloading = g::Cvar_FindVar("g_reloading");
+    int value = reloading ? *(int*)(reloading + 0x20) : 0;
+    if (value != 1 || !CoopActive()) return;
+    Log("host: mision fallida (g_reloading %d), se sueltan los remotos hasta que cargue el checkpoint", value);
+    HostDropRemotes(g::CvarString("mapname"));
+}
+
+// SV_SpawnServer(mapa, x) (0x44c1b0; unico llamador SV_Map_f en 0x448246): fin de nivel (spmap), map/devmap en la
+// consola. Antes de que arranque el servidor nuevo, los remotos se sueltan y se les dice que mapa cargar.
+constexpr uintptr_t SPAWN_SERVER = 0x44c1b0, SPAWN_SERVER_CALL = 0x448246;
+
+void __cdecl Hook_SpawnServer(const char* map, int x)
+{
+    if (S && S->role == HOST && CoopActive()) {
+        Log("host: carga el mapa %s, los remotos lo cargan y vuelven", map);
+        HostDropRemotes(map);
+    }
+    ((void(__cdecl*)(const char*, int))SPAWN_SERVER)(map, x);
+}
+
+void HookSpawnServer(bool on)
+{
+    uint8_t* call = (uint8_t*)SPAWN_SERVER_CALL;
+    uintptr_t want = on ? (uintptr_t)Hook_SpawnServer : SPAWN_SERVER;
+    if (call[0] == 0xE8 && SPAWN_SERVER_CALL + 5 + *(int32_t*)(call + 1) != want) hook::PatchRel32(SPAWN_SERVER_CALL, (void*)want);
 }
 
 // ---------- joiner ----------
@@ -1335,6 +1416,8 @@ void JoinerSendJoin()
     w.Put<int>(*(int*)(g::clc_netchan + g::NC_IN));
     w.Put<int>(g::clc_serverCommandSequence);
     w.Put<int>(g::clc_reliableSequence);
+    const char* map = g::CvarString("mapname");  // el host contesta M_MAP si no es el suyo
+    w.Put(map, (int)strlen(map) + 1);
     SendTo(S->host, w.buf, w.len);
     S->lastJoinTry = GetTickCount();
 }
@@ -1361,19 +1444,46 @@ void JoinerHijack()
     g::Com_Printf("^2COOP: conectado al host (jugador %d)\n", S->slot + 1);
 }
 
+// nombre de mapa que manda el host (va a la consola con devmap): solo letras, numeros, _ y -; si no, ""
+const char* MapName(const Reader& r)
+{
+    static char name[64];
+    name[0] = 0;
+    int len = 0;
+    for (const uint8_t* p = r.p; p < r.end && *p; ++p, ++len)
+        if (len >= (int)sizeof name - 1 || !(isalnum(*p) || *p == '_' || *p == '-')) return name;
+    if (r.p + len >= r.end) return name;  // sin terminador
+    memcpy(name, r.p, len);
+    name[len] = 0;
+    return name;
+}
+
 void JoinerControl(uint8_t type, Reader r)
 {
     switch (type) {
     case M_ACCEPT:
         if (S->joined) return;
         S->slot = r.Get<int>();
-        strncpy(S->hostMap, (const char*)r.p, sizeof S->hostMap - 1);
+        snprintf(S->hostMap, sizeof S->hostMap, "%s", MapName(r));
         memset(S->cs, 0, sizeof S->cs);
         break;
     case M_FULL:
         g::Com_Printf("^1COOP: el host esta lleno (4 jugadores)\n");
         S->role = NONE;
         break;
+    case M_MAP: {  // el host esta en otro mapa: cargarlo y volver a pedir lugar
+        const char* map = MapName(r);
+        if (S->joined || S->role != JOINER || !*map) return;
+        if (!_stricmp(map, g::CvarString("mapname"))) return;  // respuesta vieja (pedidos en cola mientras el host cargaba)
+        snprintf(S->hostMap, sizeof S->hostMap, "%s", map);
+        S->role = NONE;  // hasta cooprejoin
+        Log("joiner: el host esta en %s, lo cargo y vuelvo a entrar", map);
+        g::Com_Printf("^3COOP: el host est\xe1 en %s, cargando...\n", map);
+        char cmd[128];
+        snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", map);
+        g::Cbuf_AddText(cmd);
+        break;
+    }
     case M_CS:
         while (r.p + 4 <= r.end) {
             int i = r.Get<uint16_t>(), l = r.Get<uint16_t>();
@@ -1393,17 +1503,21 @@ void JoinerControl(uint8_t type, Reader r)
         if (S->joined) JoinerApplyAnims(r);
         break;
     case M_RELOAD: {
-        // El host vuelve al checkpoint y su reloj retrocede: el cgame de aca cortaria con "Server time went
-        // backwards". Se hace como al entrar: mapa local de nuevo y despues unirse (cooprejoin). Los DObj propios
-        // se liberan ahora, mientras su memoria sigue valida.
+        // El host carga un mapa: el checkpoint (su reloj retrocede y el cgame de aca cortaria con "Server time went
+        // backwards") o el nivel siguiente. Se hace como al entrar: ese mapa local y despues unirse (cooprejoin).
+        // Los DObj propios se liberan ahora, mientras su memoria sigue valida.
         if (!S->joined) return;
+        const char* map = MapName(r);
+        bool newMap = *map && _stricmp(map, S->hostMap) != 0;
+        if (*map) snprintf(S->hostMap, sizeof S->hostMap, "%s", map);
         for (int e = 0; e < g::MAX_GENTITIES; ++e)
             if (S->ownTree[e]) JoinerFreeDObj(e);
         S->joined = S->frozen = false;
         S->role = NONE;  // hasta cooprejoin: no se manda nada mientras carga
         memset(S->downed, 0, sizeof S->downed);
-        Log("joiner: el host recarga el checkpoint, recargo %s y vuelvo a entrar", S->hostMap);
-        g::Com_Printf("^3COOP: el host vuelve al \xfaltimo checkpoint, reconectando...\n");
+        Log("joiner: el host carga %s (%s), lo cargo y vuelvo a entrar", S->hostMap, newMap ? "nivel nuevo" : "checkpoint");
+        if (newMap) g::Com_Printf("^3COOP: el host pasa a %s, cargando...\n", S->hostMap);
+        else g::Com_Printf("^3COOP: el host vuelve al \xfaltimo checkpoint, reconectando...\n");
         char cmd[128];
         snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", S->hostMap);
         g::Cbuf_AddText(cmd);
@@ -1738,7 +1852,7 @@ const CmdDef kCmds[] = {
     {"coopdobj", Cmd_CoopDObj}, {"coopgod", Cmd_CoopGod},   {"cooplook", Cmd_CoopLook}, {"coopstate", Cmd_CoopState},
     {"coopbodydraw", Cmd_CoopBodyDraw}, {"coopanims", Cmd_CoopAnims}, {"coopcmd", Cmd_CoopCmd}, {"coopent", Cmd_CoopEnt},
     {"coophealth", Cmd_CoopHealth}, {"coopkill", Cmd_CoopKill}, {"cooplists", Cmd_CoopLists},
-    {"cooprejoin", Cmd_CoopRejoin},
+    {"cooprejoin", Cmd_CoopRejoin}, {"coopendlevel", Cmd_CoopEndLevel},
 };
 
 }  // namespace
@@ -1763,6 +1877,7 @@ EXPORT void Coop_Shutdown()
 {
     HookCgame(false);  // el puntero apunta a esta DLL, que se va a descargar
     HookDamage(false);
+    HookSpawnServer(false);
     HookUsercmd(false);
     SkipUiPauseCheck(false);
     Log("nucleo descargado");
@@ -1836,6 +1951,7 @@ EXPORT void __cdecl Coop_HostFrame()
     if (S->role != HOST) return;
     HookCgame(true);
     HookDamage(true);
+    HookSpawnServer(true);
     HookUsercmd(true);
     static int lastTime;
     int now = *(int*)0x152e930;  // sv.time
