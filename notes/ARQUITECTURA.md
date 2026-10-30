@@ -142,6 +142,15 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   + n, literal) corta linea, Latin-1 y ^colores andan. Cartel fijo (caido, barra de levantar) se renueva cada
   2 s; aviso suelto (cayo / se levanto) una vez. cgame: texto en 0x30125820, hora en 0x30125814, cg.time
   0x3011e0a4, cgs.serverCommandSequence 0x3010b894. Las capitales con tilde salen sin tilde (fuente).
+- Brazos en primera persona = ps+0xac viewmodelIndex (indice de modelo, 8 bits). El script del nivel hace
+  setviewmodel solo al jugador 0; los remotos quedaban con viewmodel_hands_us (sin textura en el nivel -> blancos).
+  El host copia el suyo a cada remoto antes de cada snapshot.
+- Brujula (cgame 0x3000d380): aliados de la IA en una tabla de 32 lugares en cgame+0x12601c (16 bytes: hora
+  cg.time, x, y, rumbo), uno por indice de actor (32 actores maximo); se dibuja si la hora tiene < 800 ms. Los
+  llena el cgame con las entidades eType 11 del snapshot (trap 0xe0 dice si es aliado con drawoncompass) y
+  ps+0x3b4 iCompassFriendInfo (uno lejano por frame, empaquetado). Tanques: tabla siguiente (cgame+0x12621c),
+  eType 14, trap 0xe2, ps+0x3b8. Los jugadores van en el lugar 31 - n: el host los escribe con sus datos y a los
+  remotos les manda x, y, rumbo de todos en el mensaje 'W'. Riesgo: un aliado de la IA con indice >= 28.
 - Pruebas: coophealth <n> <vida>, coopkill <n> [daño] (G_Damage del mundo con gvm como VM actual),
   coopcmd <n>, coopent <n>, cooplook <n> <ent> [dist] [pitch]; tools\stack.ps1 <pid> (pila de un proceso
   colgado), tools\peek.ps1 <pid> <dir> <bytes>; run.ps1 click <x> <y>.

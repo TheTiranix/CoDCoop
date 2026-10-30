@@ -253,6 +253,32 @@ void GiveHostLoadout(int n)
     Log("jugador %d: recibe el equipo del host (arma %d)", n, *(int*)(ps + 0xa0));
 }
 
+// Brazos en primera persona (ps+0xac viewmodelIndex): el script del nivel hace setviewmodel solo al jugador 0 y el
+// remoto queda con el de por defecto (viewmodel_hands_us), que el nivel no cargo y se ve blanco.
+void CopyHostViewmodel(int n)
+{
+    uint8_t* gameClients = *(uint8_t**)0x152bc64;
+    if (gameClients) *(int*)(gameClients + n * *(int*)0x152bc68 + 0xac) = *(int*)(gameClients + 0xac);
+}
+
+// Brujula: el cgame dibuja a los aliados de la IA desde una tabla de 32 lugares (cgame+0x12601c, 16 bytes c/u: hora,
+// x, y, rumbo; se ve si la hora tiene menos de 800 ms) indexada por numero de actor. Los compañeros van en los
+// ultimos lugares (31 - jugador); solo chocarian con un aliado de la IA con indice de actor 28 o mas.
+void DrawTeamOnCompass(uint8_t mask, const float (*pos)[3], int self)
+{
+    uint8_t* cg = (uint8_t*)GetModuleHandleA("cgamex86.dll");
+    if (!cg) return;
+    int now = *(int*)(cg + 0x11e0a4);  // cg.time
+    for (int p = 0; p < g::MAX_CLIENTS; ++p) {
+        if (p == self || !(mask >> p & 1)) continue;
+        int32_t* slot = (int32_t*)(cg + 0x12601c) + (31 - p) * 4;
+        slot[0] = now;
+        memcpy(slot + 1, pos[p], 12);
+    }
+}
+uint8_t g_team;                            // remoto: jugadores en el mapa segun el host (mascara)
+float g_teamPos[g::MAX_CLIENTS][3];        // x, y, rumbo de cada uno
+
 // diagnostico: cuantas listas de enlaces de caminos (gentity+0x2b6) estan rotas (ver Cmd_CoopLists)
 int BrokenPathLists(int* lists)
 {
@@ -1349,6 +1375,10 @@ void JoinerControl(uint8_t type, Reader r)
             S->downed[m] = d;
             DownedMessage(m, d, S->slot);
         }
+        g_team = r.Get<uint8_t>();
+        for (auto& p : g_teamPos)
+            for (float& v : p) v = r.Get<float>();
+        if (!r.Ok()) g_team = 0;
         break;
     }
     case M_ENTS: {
@@ -1769,6 +1799,15 @@ EXPORT void __cdecl Coop_HostFrame()
     HostUpdateBodies();
     HostAnimateBodies(dt);
     HostDownedFrame(dt);
+    uint8_t team = 0;  // quien esta en el mapa y donde (brujula de todos)
+    float teamPos[g::MAX_CLIENTS][3] = {};
+    for (int n = 0; n < g::MAX_CLIENTS; ++n) {
+        if (!PlayerInGame(n)) continue;
+        team |= 1 << n;
+        memcpy(teamPos[n], PlayerState(n) + 0x14, 8);
+        teamPos[n][2] = *(float*)(g::Entity(n) + 0x48);  // apos.trBase yaw
+    }
+    if (CoopActive()) DrawTeamOnCompass(team, teamPos, 0);
     uint8_t* gameClients = *(uint8_t**)0x152bc64;
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
         if (!S->god[n] || !gameClients || *(int*)(g::Client(n) + g::CL_STATE) != 1) continue;
@@ -1782,12 +1821,15 @@ EXPORT void __cdecl Coop_HostFrame()
         if (*(int*)(cl + g::CL_STATE) != 1) { S->remote[n].active = false; continue; }
         FixClientNum(n);
         GiveHostLoadout(n);
+        CopyHostViewmodel(n);
         g::SV_SendClientSnapshot(cl);
         ++g_statSnaps;
-        Writer w(M_DOWNED);  // quien esta caido (el remoto filtra su prediccion y avisa)
+        Writer w(M_DOWNED);  // quien esta caido (el remoto filtra su prediccion y avisa) y la brujula
         uint8_t mask = 0;
         for (int m = 0; m < g::MAX_CLIENTS; ++m) mask |= S->downed[m] << m;
         w.Put<uint8_t>(mask);
+        w.Put<uint8_t>(team);
+        w.Put(teamPos, sizeof teamPos);
         SendTo(S->remote[n].addr, w.buf, w.len);
         SendEntities(n);
         SendDObjs(n);
@@ -1801,6 +1843,7 @@ EXPORT int __cdecl Coop_FrozenFrame(int msec)
     if (!S->frozen) return 0;
     HookCgame(true);
     HookUsercmd(true);
+    DrawTeamOnCompass(g_team, g_teamPos, S->slot);
     int& t = S->frozenTime;
     int latest = *(int*)0x1426e68;  // cl.snap.serverTime
     int target = latest - 50;
