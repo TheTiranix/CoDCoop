@@ -14,6 +14,7 @@
 #include "api.h"
 #include "game.h"
 #include "hook.h"
+#include "steam.h"
 
 static const CoreApi* g_api;
 
@@ -82,7 +83,7 @@ struct Remote {
 
 // Todo lo que tiene que sobrevivir a una recarga del nucleo. La memoria la guarda ddraw.dll; si cambia
 // el tamaño o STATE_VERSION, el cargador la pone en cero (se pierde la conexion).
-constexpr uint32_t STATE_VERSION = 3;
+constexpr uint32_t STATE_VERSION = 4;
 struct State {
     int role;
     SOCKET sock;
@@ -99,6 +100,7 @@ struct State {
     bool downed[g::MAX_CLIENTS];         // host: caido esperando que lo levanten
     float reviveTime[g::MAX_CLIENTS];    // host: segundos que un compañero lleva levantandolo
     char cs[g::MAX_CONFIGSTRINGS][1024];
+    uint64_t steamPeer[steam::MAX_PEERS];  // amigos de Steam detras de las direcciones falsas (steam::Addr)
 };
 State* S;
 
@@ -193,12 +195,19 @@ int CvarInt(const char* name)
     return v ? *(int*)(v + 0x20) : 0;
 }
 
+// por UDP, o por Steam si es la direccion falsa de un amigo de Steam
+void RawSend(const sockaddr_in& to, const void* data, int len)
+{
+    if (steam::IsAddr(to)) steam::Send(steam::IdOf(S->steamPeer, to), data, len);
+    else sendto(S->sock, (const char*)data, len, 0, (const sockaddr*)&to, sizeof to);
+}
+
 void FlushDelayed(bool all = false)
 {
     DWORD now = GetTickCount();
     while (!g_delayed.empty() && (all || (int)(now - g_delayed.front().due) >= 0)) {
         const Delayed& d = g_delayed.front();
-        sendto(S->sock, (const char*)d.data.data(), (int)d.data.size(), 0, (const sockaddr*)&d.to, sizeof d.to);
+        RawSend(d.to, d.data.data(), (int)d.data.size());
         g_delayed.pop_front();
     }
 }
@@ -209,7 +218,7 @@ void SendTo(const sockaddr_in& to, const void* data, int len)
     if (loss > 0 && rand() % 100 < loss) return;
     if (lag <= 0) {
         FlushDelayed(true);  // si se acaba de apagar, primero lo que quedo en la cola
-        sendto(S->sock, (const char*)data, len, 0, (const sockaddr*)&to, sizeof to);
+        RawSend(to, data, len);
         return;
     }
     g_delayed.push_back({GetTickCount() + lag, to, std::vector<uint8_t>((const uint8_t*)data, (const uint8_t*)data + len)});
@@ -1915,6 +1924,86 @@ void JoinerKeepAlive()
     g::Cbuf_AddText("disconnect\n");
 }
 
+// ---------- Steam (steam.h) ----------
+
+// "Unirse a la partida" desde la lista de amigos de Steam: el texto viene del rich presence de otro, asi que
+// solo se acepta exactamente "+coopjoin steam:<numero>"
+void OnSteamJoin(const char* connect)
+{
+    const char* id = connect + strlen("+coopjoin steam:");
+    if (strncmp(connect, "+coopjoin steam:", strlen("+coopjoin steam:")) || !*id || strspn(id, "0123456789") != strlen(id)) {
+        Log("steam: pedido de union ignorado: '%.64s'", connect);
+        return;
+    }
+    char cmd[64];
+    snprintf(cmd, sizeof cmd, "coopjoin steam:%s\n", id);
+    g::Cbuf_AddText(cmd);
+}
+
+// botones "Unirse a <amigo>" del menu desde el k-esimo: ocultos (el menu los esconde con coop_friendid = "0")
+void HideFriendButtons(int k)
+{
+    for (; k <= 3; ++k) {
+        char var[32];
+        snprintf(var, sizeof var, "ui_coop_friend%d", k);
+        g::Cvar_Set(var, "");
+        snprintf(var, sizeof var, "coop_friendid%d", k);
+        g::Cvar_Set(var, "0");
+    }
+}
+
+// Cada frame: Steam (se reintenta si se abre despues), callbacks, rich presence del host y, cada 2 s, los
+// amigos anfitriones para el menu Cooperativo (cvars ui_coop_friend1..3 = texto, coop_friendid1..3 = SteamID).
+void SteamFrame()
+{
+    static bool wasUp, presence, triedOnce;
+    bool up = steam::Start();
+    if (up != wasUp || !triedOnce) {
+        if (up) Log("steam: listo como '%s' (%I64u)", steam::Name(steam::MyId()), steam::MyId());
+        else Log("steam: no disponible (%s), solo por IP", steam::error);
+        if (!up) {
+            g::Cvar_Set("ui_coop_steam", "Steam cerrado: solo se puede unir por IP.");
+            HideFriendButtons(1);
+        }
+        wasUp = up;
+        triedOnce = true;
+    }
+    if (!up) return;
+    steam::Poll(OnSteamJoin);
+    if (S->role == HOST && !presence) {
+        char connect[64];
+        snprintf(connect, sizeof connect, "+coopjoin steam:%I64u", steam::MyId());
+        steam::SetPresence("codcoop", "host");
+        steam::SetPresence("connect", connect);
+        steam::SetPresence("status", "Anfitri\xc3\xb3n de CoD Coop");
+        presence = true;
+    }
+    static DWORD lastScan;
+    if (GetTickCount() - lastScan < 2000) return;
+    lastScan = GetTickCount();
+    struct { char text[3][96], id[3][24]; } now = {};
+    static decltype(now) prev = {{"-"}};
+    int found = 0;
+    steam::ForEachHost([&](uint64_t id) {
+        if (found == 3) return;
+        char name[64];
+        steam::Latin1(steam::Name(id), name, sizeof name);
+        snprintf(now.text[found], sizeof now.text[found], "Unirse a %s", name);
+        snprintf(now.id[found], sizeof now.id[found], "%I64u", id);
+        ++found;
+    });
+    if (!memcmp(&now, &prev, sizeof now)) return;  // solo si cambio la lista: Cvar_Set lo anuncia en la consola
+    prev = now;
+    for (int k = 0; k < 3; ++k) {
+        char var[32];
+        snprintf(var, sizeof var, "ui_coop_friend%d", k + 1);
+        g::Cvar_Set(var, now.text[k]);
+        snprintf(var, sizeof var, "coop_friendid%d", k + 1);
+        g::Cvar_Set(var, now.id[k][0] ? now.id[k] : "0");
+    }
+    g::Cvar_Set("ui_coop_steam", found ? "Amigos de Steam con partida creada:" : "Steam: ning\xfan amigo cre\xf3 una partida todav\xed" "a.");
+}
+
 // ---------- comandos de consola ----------
 
 void Cmd_CoopHost()
@@ -1928,7 +2017,7 @@ void Cmd_CoopHost()
     S->role = HOST;
     g::Com_Printf("^2COOP: host listo en el puerto %d. Los demas: coopjoin <tu ip>\n", port);
     CoopStatus("Anfitri\xf3n listo (puerto UDP %d). Ahora eleg\xed Nueva Partida o Cargar Partida; "
-               "los dem\xe1s se unen con tu IP.", port);
+               "los dem\xe1s se unen con tu IP%s.", port, steam::up ? " o desde Steam" : "");
 }
 
 // coopjoin <ip>[:puerto]; sin argumento usa la IP escrita en el menu Cooperativo (cvar coop_ip)
@@ -1943,28 +2032,55 @@ void Cmd_CoopJoin()
     char host[128];
     strncpy(host, target, sizeof host - 1);
     host[sizeof host - 1] = 0;
-    int port = 28960;
-    if (char* c = strchr(host, ':')) { *c = 0; port = atoi(c + 1); }
-    addrinfo hints{}, *res = nullptr;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
     if (!OpenSocket(0)) return;
-    if (getaddrinfo(host, nullptr, &hints, &res) != 0 || !res) {
-        g::Com_Printf("^1COOP: no se encontro '%s'\n", host);
-        CoopStatus("No se encontr\xf3 '%s'.", host);
-        return;
+    if (!_strnicmp(host, "steam:", 6)) {  // coopjoin steam:<SteamID> (boton del menu o "Unirse a la partida" de Steam)
+        uint64_t id = _strtoui64(host + 6, nullptr, 10);
+        if (!steam::up || !id) {
+            g::Com_Printf("^1COOP: %s\n", steam::up ? "uso: coopjoin steam:<SteamID>" : "Steam no esta abierto");
+            CoopStatus(steam::up ? "Ese amigo de Steam no es v\xe1lido." : "Steam no est\xe1 abierto.");
+            return;
+        }
+        S->host = steam::Addr(S->steamPeer, id);
+        steam::Latin1(steam::Name(id), host, sizeof host);
+    } else {
+        int port = 28960;
+        if (char* c = strchr(host, ':')) { *c = 0; port = atoi(c + 1); }
+        addrinfo hints{}, *res = nullptr;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        if (getaddrinfo(host, nullptr, &hints, &res) != 0 || !res) {
+            g::Com_Printf("^1COOP: no se encontro '%s'\n", host);
+            CoopStatus("No se encontr\xf3 '%s'.", host);
+            return;
+        }
+        S->host = *(sockaddr_in*)res->ai_addr;
+        S->host.sin_port = htons((u_short)port);
+        freeaddrinfo(res);
     }
-    S->host = *(sockaddr_in*)res->ai_addr;
-    S->host.sin_port = htons((u_short)port);
-    freeaddrinfo(res);
     S->role = JOINER;
     S->joined = false;
     S->hostMap[0] = 0;
     memset(S->cs, 0, sizeof S->cs);  // el gamestate se junta de los M_CS de este intento
     JoinerSendJoin();
-    g::Com_Printf("COOP: uniendose a %s:%d...\n", host, port);
-    CoopStatus("Buscando al anfitri\xf3n en %s:%d... (tiene que haber elegido Crear partida y estar jugando)",
-               host, port);
+    if (steam::IsAddr(S->host)) {
+        g::Com_Printf("COOP: uniendose a %s por Steam...\n", host);
+        CoopStatus("Buscando a %s por Steam... (tiene que haber elegido Crear partida y estar jugando)", host);
+    } else {
+        g::Com_Printf("COOP: uniendose a %s:%d...\n", host, ntohs(S->host.sin_port));
+        CoopStatus("Buscando al anfitri\xf3n en %s:%d... (tiene que haber elegido Crear partida y estar jugando)",
+                   host, ntohs(S->host.sin_port));
+    }
+}
+
+// coopjoinfriend <1..3>: boton "Unirse a <amigo>" del menu (SteamID en coop_friendid<n>, ver SteamFrame)
+void Cmd_CoopJoinFriend()
+{
+    char var[32], cmd[64];
+    snprintf(var, sizeof var, "coop_friendid%d", atoi(g::Argv(1)));
+    const char* id = g::CvarString(var);
+    if (!*id || !strcmp(id, "0")) return;
+    snprintf(cmd, sizeof cmd, "coopjoin steam:%s\n", id);
+    g::Cbuf_AddText(cmd);
 }
 
 // despues de recargar el mapa por M_RELOAD: volver a unirse al mismo host (lo reintenta cada 1 s)
@@ -2229,6 +2345,7 @@ const CmdDef kCmds[] = {
     {"coopbodydraw", Cmd_CoopBodyDraw}, {"coopanims", Cmd_CoopAnims}, {"coopcmd", Cmd_CoopCmd}, {"coopent", Cmd_CoopEnt},
     {"coophealth", Cmd_CoopHealth}, {"coopkill", Cmd_CoopKill}, {"cooplists", Cmd_CoopLists},
     {"cooprejoin", Cmd_CoopRejoin}, {"coopendlevel", Cmd_CoopEndLevel}, {"coopweapons", Cmd_CoopWeapons}, {"coopuiclick", Cmd_CoopUiClick}, {"coopnet", Cmd_CoopNet},
+    {"coopjoinfriend", Cmd_CoopJoinFriend},
 };
 
 }  // namespace
@@ -2247,6 +2364,7 @@ EXPORT void Coop_Init(const CoreApi* api, void* state, int fresh)
         S->role = NONE;
     }
     Log("nucleo listo (rol %d, %s)", S->role, fresh ? "estado nuevo" : "estado conservado");
+    if (!steam::SelfTest()) Log("steam: FALLA la autoprueba de direcciones falsas / nombres");
 }
 
 EXPORT void Coop_Shutdown()
@@ -2290,6 +2408,7 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
 {
     PollCmdFile();
     StatsTick();
+    SteamFrame();
     if (S->sock == INVALID_SOCKET) return 0;
     FlushDelayed();
     if (S->role == HOST && sock == NS_SERVER) {  // corre aunque el juego este en pausa
@@ -2304,6 +2423,10 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
         sockaddr_in a;
         int alen = sizeof a;
         int n = recvfrom(S->sock, (char*)buf, sizeof buf, 0, (sockaddr*)&a, &alen);
+        if (n <= 0) {  // UDP vacio: lo que llego por Steam
+            uint64_t id;
+            if ((n = steam::Recv(buf, sizeof buf, &id)) > 0) a = steam::Addr(S->steamPeer, id);
+        }
         if (n <= 0) {
             if (S->role == HOST) HostCheckRemotes();
             return 0;

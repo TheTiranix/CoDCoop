@@ -18,7 +18,16 @@ Jugar
 2. El anfitrión toca "Crear partida" y después elige Nueva Partida o Cargar Partida.
 3. Los demás escriben la IP del anfitrión y tocan "Unirse".
 
-Por internet
+Por Steam (sin abrir puertos)
+- Todos con Steam abierto y el juego abierto.
+- Cuando el anfitrión toca "Crear partida", a sus amigos de Steam les aparece en el menú
+  Cooperativo el botón "Unirse a <nombre>".
+- También se puede desde la lista de amigos de Steam: clic derecho en el anfitrión ->
+  "Unirse a la partida" (con el juego ya abierto).
+- Mientras el juego está abierto, Steam muestra "Jugando a Spacewar": es normal, el coop
+  usa esa app de prueba de Steam para conectarse.
+
+Por internet con IP
 - El anfitrión tiene que abrir el puerto UDP 28960 en su router (dirigido a su PC)
   y pasarles su IP pública (buscá "cuál es mi IP" en internet).
 - En la misma casa o red alcanza con la IP local del anfitrión (comando ipconfig).
@@ -26,5 +35,6 @@ Por internet
   o ZeroTier) y la IP que ese programa le da al anfitrión.
 
 Desinstalar
-- Borrá de la carpeta del juego: ddraw.dll, codcoop_core.dll, main\pakz_coop.pk3 y la
-  carpeta codcoop_tmp. Si hay un ddraw.dll.bak, cambiale el nombre a ddraw.dll.
+- Borrá de la carpeta del juego: ddraw.dll, codcoop_core.dll, steam_api.dll,
+  main\pakz_coop.pk3 y la carpeta codcoop_tmp. Si hay archivos .bak (ddraw.dll.bak o
+  steam_api.dll.bak), sacales el .bak del nombre.

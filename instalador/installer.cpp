@@ -11,6 +11,7 @@ static const DWORD CODSP_SIZE = 1716224;  // CoDSP.exe 1.5: el mod usa direccion
 struct File { int id; const wchar_t* dest; };
 static const File FILES[] = {
     {1, L"ddraw.dll"}, {2, L"codcoop_core.dll"}, {3, L"main\\pakz_coop.pk3"}, {4, L"LEEME CoD Coop.txt"},
+    {5, L"steam_api.dll"},
 };
 
 static int Msg(UINT flags, const std::wstring& text) { return MessageBoxW(nullptr, text.c_str(), TITLE, flags); }
@@ -51,6 +52,13 @@ static std::string ReadAll(const std::wstring& path)
     ReadFile(f, &data[0], (DWORD)data.size(), &got, nullptr);
     CloseHandle(f);
     return data;
+}
+
+static std::string Resource(int id)
+{
+    HRSRC r = FindResourceW(nullptr, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10));  // RT_RCDATA
+    HGLOBAL g = r ? LoadResource(nullptr, r) : nullptr;
+    return g ? std::string((const char*)LockResource(g), SizeofResource(nullptr, r)) : std::string();
 }
 
 // false con GetLastError() del archivo
@@ -102,10 +110,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                                        L"\n\n¿Instalar igual?") != IDYES)
         return 0;
 
-    // un ddraw.dll que no es el nuestro (otro mod o arreglo de video) se guarda como ddraw.dll.bak
-    std::wstring ddraw = dir + L"\\ddraw.dll", bak = ddraw + L".bak";
-    if (Exists(ddraw) && !Exists(bak) && ReadAll(ddraw).find("codcoop_core.dll") == std::string::npos)
-        MoveFileW(ddraw.c_str(), bak.c_str());
+    // un ddraw.dll o steam_api.dll que no es el nuestro (otro mod, arreglo de video) se guarda como .bak
+    std::wstring ddraw = dir + L"\\ddraw.dll", steamDll = dir + L"\\steam_api.dll";
+    if (Exists(ddraw) && !Exists(ddraw + L".bak") && ReadAll(ddraw).find("codcoop_core.dll") == std::string::npos)
+        MoveFileW(ddraw.c_str(), (ddraw + L".bak").c_str());
+    if (Exists(steamDll) && !Exists(steamDll + L".bak") && ReadAll(steamDll) != Resource(5))
+        MoveFileW(steamDll.c_str(), (steamDll + L".bak").c_str());
 
     CreateDirectoryW((dir + L"\\main").c_str(), nullptr);
     for (const File& f : FILES) {

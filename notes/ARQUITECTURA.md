@@ -240,3 +240,17 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
 
 - El inicio de pathfinder deja al jugador en z=2370 con pm_type 1 (paracaidas) unos segundos: no mover jugadores
   con coopbring/cooplook antes de que aterrice (quedan flotando fuera del mapa, sin cielo).
+
+## Steam (Spacewar, AppID 480)
+- src/steam.h: steam_api.dll de 32 bits (el redistribuible de SteamVR, 8.33) cargado a mano. No exporta
+  SteamAPI_Init: se usa SteamInternal_SteamAPI_Init(lista de interfaces, error) con SteamUser023, SteamFriends017
+  y SteamNetworkingMessages002; AppID por la variable de entorno SteamAppId. Callbacks con ManualDispatch
+  (1251 aceptar sesion, 337 "Unirse a la partida" de la lista de amigos). Si Steam esta cerrado se reintenta cada 10 s.
+- Recarga del nucleo: steam_api.dll queda cargado; SteamAPI_GetHSteamUser() != 0 = ya iniciado, no se reinicia.
+- Cada amigo de Steam es la direccion falsa 0.83.84.n:480 (State.steamPeer[n-1] = SteamID): RawSend elige UDP o
+  SendMessageToUser, la recepcion junta recvfrom y ReceiveMessagesOnChannel. El resto del mod no se entera.
+- Host: rich presence codcoop=host, connect="+coopjoin steam:<id>". El menu: cada 2 s los amigos con codcoop=host
+  -> ui_coop_friend1..3 (texto) y coop_friendid1..3 (SteamID, "0" esconde el boton con cvarTest/hideCvar). Los
+  cvars se escriben solo si cambia la lista (Cvar_Set lo anuncia en la consola).
+- Con una sola cuenta de Steam no se puede probar host + joiner en la misma PC: lo que un juego se manda a su propio
+  SteamID le vuelve a el mismo, no al otro proceso.
