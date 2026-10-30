@@ -151,6 +151,15 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   ps+0x3b4 iCompassFriendInfo (uno lejano por frame, empaquetado). Tanques: tabla siguiente (cgame+0x12621c),
   eType 14, trap 0xe2, ps+0x3b8. Los jugadores van en el lugar 31 - n: el host los escribe con sus datos y a los
   remotos les manda x, y, rumbo de todos en el mensaje 'W'. Riesgo: un aliado de la IA con indice >= 28.
+- Pausa del SP = cvar cl_paused (cvar_t* en 0x14e440c): SV_Frame (0x44cf10) no avanza y CL_SendCmd (0x40b3e0)
+  no manda usercmds. SV_Frame mismo lo pone en 1 si la UI esta en pantalla completa (0x44d0a3; JNZ en 0x44d0a6).
+  Con remotos el host cambia ese JNZ por JMP y repone cl_paused 0 (menu ESC y ventana minimizada no frenan a
+  nadie). Cvar_Set = 0x431cf0 (EAX 1 = forzar, cdecl nombre, valor). UI: vm en 0x14bd648, vmMain 7 =
+  SetActiveMenu (0 = cerrar todo), 8 = ultimo menu (no confiable).
+- "Haz clic para iniciar" (ui/pregame.menu, boton -> uiScript playerstart = cl_paused 0, "fade 0 0 0 0 3",
+  cg_norender 0, cerrar menus). Se reconoce por cl_paused 1 + cg_norender 1. El remoto lo hace solo al entrar.
+  La carga de un checkpoint no muestra esa pantalla en el host (la carga de partida deja cl_paused 0).
+- tools\mem.py <pid> <dir> | s:<dir> | cv:<dir>: lee memoria de un juego abierto. En PowerShell `rd` es borrar.
 - Pruebas: coophealth <n> <vida>, coopkill <n> [daño] (G_Damage del mundo con gvm como VM actual),
   coopcmd <n>, coopent <n>, cooplook <n> <ent> [dist] [pitch]; tools\stack.ps1 <pid> (pila de un proceso
   colgado), tools\peek.ps1 <pid> <dir> <bytes>; run.ps1 click <x> <y>.

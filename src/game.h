@@ -64,6 +64,17 @@ inline auto SV_SetConfigstring = (void(__cdecl*)(int, const char*))0x44b900;
 inline auto CL_ApplyConfigstrings = (void(__cdecl*)(uint16_t*))0x40fae0;
 inline auto CL_NetchanSetup = (void(__cdecl*)(netadr_t))0x40de40;
 
+inline uint8_t*& uivm = *(uint8_t**)0x14bd648;
+inline uint8_t*& cl_paused = *(uint8_t**)0x14e440c;  // cvar_t*
+inline void Cvar_Set(const char* name, const char* value)  // 0x431cf0: EAX = 1 (forzar), cdecl (nombre, valor)
+{
+    int force = 1;
+    asm volatile("push %2\n\tpush %1\n\tcall *%3\n\tadd $8, %%esp"
+                 : "+a"(force)
+                 : "r"(name), "r"(value), "r"((void*)0x431cf0)
+                 : "ecx", "edx", "memory");
+}
+
 inline const char* Argv(int i) { return i < cmd_argc ? cmd_argv[i] : ""; }
 inline const char* CvarString(const char* name)
 {

@@ -1263,6 +1263,48 @@ void HookDamage(bool on)
     }
 }
 
+// Pausas (tarea 2.5). El SP se pausa con cl_paused 1: SV_Frame no avanza y el cliente no manda usercmds
+// (0x40b3e0). Lo pone la UI al abrir un menu y SV_Frame mismo si la UI esta en pantalla completa (0x44d0a3; el
+// JNZ de 0x44d0a6 saltea ese paso).
+// "Haz clic para iniciar" (ui/pregame.menu): pausa con el mundo sin dibujar; cg_norender queda en 1 desde la carga
+// hasta el clic (uiScript playerstart). El ultimo menu de la UI (uix86+0x1bd394) no sirve: tras un devmap en
+// juego queda en 7 aunque la pantalla sea la misma.
+bool PregameOpen()
+{
+    uint8_t* norender = g::Cvar_FindVar("cg_norender");
+    return norender && *(int*)(norender + 0x20) && g::cl_paused && *(int*)(g::cl_paused + 0x20);
+}
+
+void SkipUiPauseCheck(bool skip)
+{
+    uint8_t* jnz = (uint8_t*)0x44d0a6;
+    uint8_t want = skip ? 0xEB : 0x75;  // JMP / JNZ original
+    if (*jnz != want && (*jnz == 0xEB || *jnz == 0x75)) hook::Write((uintptr_t)jnz, &want, 1);
+}
+
+// Host: con remotos conectados el menu no pausa (como en multijugador). La pantalla de inicio tras cargar si.
+void HostNoPause()
+{
+    bool on = CoopActive() && !PregameOpen();
+    SkipUiPauseCheck(on);
+    if (on && *(int*)(g::cl_paused + 0x20)) {
+        g::Cvar_Set("cl_paused", "0");
+        Log("host: menu abierto con remotos conectados, el juego sigue");
+    }
+}
+
+// Remoto: "Haz clic para iniciar" se saltea solo, haciendo lo mismo que el clic
+void JoinerSkipPregame()
+{
+    if (!S->joined || !g::uivm || !PregameOpen()) return;
+    int args[13] = {7, 0};  // UI_SET_ACTIVE_MENU, ninguno: cierra los menus y suelta el teclado
+    g::CallVM(g::uivm, args);
+    g::Cvar_Set("cl_paused", "0");
+    g::Cvar_Set("cg_norender", "0");
+    g::Cbuf_AddText("fade 0 0 0 0 3\n");
+    Log("joiner: pantalla de inicio salteada");
+}
+
 // Mision fallida (g_reloading 1): antes de que se cargue el checkpoint se sueltan los remotos y los cuerpos.
 // Si quedaran conectados, la carga les manda comandos que nadie confirma ("Reliable command buffer overflow");
 // los arboles se liberan ahora, mientras su memoria sigue siendo valida. Los remotos se vuelven a unir solos.
@@ -1722,6 +1764,7 @@ EXPORT void Coop_Shutdown()
     HookCgame(false);  // el puntero apunta a esta DLL, que se va a descargar
     HookDamage(false);
     HookUsercmd(false);
+    SkipUiPauseCheck(false);
     Log("nucleo descargado");
     g_api = nullptr;
 }
@@ -1757,7 +1800,10 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
     PollCmdFile();
     StatsTick();
     if (S->sock == INVALID_SOCKET) return 0;
-    if (S->role == HOST && sock == NS_SERVER) HostCheckReload();  // corre aunque el juego este en pausa
+    if (S->role == HOST && sock == NS_SERVER) {  // corre aunque el juego este en pausa
+        HostCheckReload();
+        HostNoPause();
+    }
     if (!((S->role == HOST && sock == NS_SERVER) || (S->role == JOINER && sock == NS_CLIENT))) return 0;
     if (S->role == JOINER && !S->joined && GetTickCount() - S->lastJoinTry > 1000) JoinerSendJoin();
 
@@ -1843,6 +1889,7 @@ EXPORT int __cdecl Coop_FrozenFrame(int msec)
     if (!S->frozen) return 0;
     HookCgame(true);
     HookUsercmd(true);
+    JoinerSkipPregame();
     DrawTeamOnCompass(g_team, g_teamPos, S->slot);
     int& t = S->frozenTime;
     int latest = *(int*)0x1426e68;  // cl.snap.serverTime
