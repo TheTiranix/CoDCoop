@@ -240,18 +240,3 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
 
 - El inicio de pathfinder deja al jugador en z=2370 con pm_type 1 (paracaidas) unos segundos: no mover jugadores
   con coopbring/cooplook antes de que aterrice (quedan flotando fuera del mapa, sin cielo).
-
-## Estado
-- Tramo 1 FUNCIONA (2026-10-29, probado con 2 juegos en esta PC): el 2do jugador se conecta al slot 1,
-  ve el mundo desde su posicion con los snapshots del host y camina (el host lo mueve con sus usercmds).
-- Falta: arma para el jugador 2, su cuerpo visible, modelos/animaciones de la IA en el cliente remoto,
-  pausa del host, cambios de mapa, internet.
-
-## Plan por tramos (cada uno se prueba antes del siguiente)
-1. Transporte UDP + conexion de un 2do cliente al slot 1 + snapshots + gamestate + estados de entidad.
-   El que se une carga el mismo mapa con su propio servidor (para colision y assets), se congela su
-   servidor y se redirige su cliente al host ("servidor sombra").
-2. DObj/animaciones de IA en el cliente remoto (mandar modelos + estado del arbol de animacion).
-3. Cuerpo visible de los jugadores remotos para el host y entre ellos.
-4. Cambios de mapa, guardados/checkpoints, muerte/reaparicion, cinematicas.
-5. Internet (puertos/NAT), lobby, 4 jugadores, recorrer la campaña.
