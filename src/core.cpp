@@ -62,7 +62,7 @@ namespace {
 
 constexpr uint32_t CTRL = 0xFFFFFFFE;  // prefijo de nuestros paquetes; el motor usa -1 (sin conexion) o una secuencia
 enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CS = 'C', M_CSDONE = 'G', M_ENTS = 'E', M_DOBJ = 'D', M_ANIM = 'N',
-                 M_DOWNED = 'W', M_RELOAD = 'R', M_MAP = 'M' };
+                 M_DOWNED = 'W', M_RELOAD = 'R', M_MAP = 'M', M_PING = 'P' };
 constexpr int ANIM_STATE = 22;  // estado cliente de un XAnimInfo: +0x1c(4) +0x24(2) +0x28..+0x37(16)
 constexpr int MAX_PACKET = 1400;
 
@@ -1527,6 +1527,53 @@ void JoinerSkipPregame()
     Log("joiner: pantalla de inicio salteada");
 }
 
+// Desconexiones (3.3). El host anota cuando llego el ultimo paquete de cada remoto; si pasan REMOTE_TIMEOUT sin
+// nada (se cerro el juego, se corto la red) lo suelta: cuerpo, entidad (ClientDisconnect = vmMain 4 del juego;
+// el 5 es ClientCommand y el 6 ClientThink) y lugar. Con el menu abierto el remoto no manda usercmds: manda
+// M_PING cada segundo. El remoto que no recibe nada del host en HOST_TIMEOUT vuelve al menu principal.
+constexpr DWORD REMOTE_TIMEOUT = 8000, HOST_TIMEOUT = 15000;
+DWORD g_lastSeen[g::MAX_CLIENTS];  // host: ultimo paquete de cada remoto (0 = sin medir todavia)
+DWORD g_hostSeen;                  // remoto: ultimo paquete del host
+
+void HostDropRemote(int n)
+{
+    Log("host: el jugador %d no responde hace %lu ms, se libera su lugar", n, GetTickCount() - g_lastSeen[n]);
+    if (S->bodyTree[n]) HostFreeBody(n);
+    S->downed[n] = false;
+    S->remote[n].active = false;
+    g::GameCall(4, n);
+    *(int*)(g::Client(n) + g::CL_STATE) = 0;
+    g_lastSeen[n] = 0;
+    char text[96];
+    snprintf(text, sizeof text, "^3El jugador %d se desconect\xf3", n + 1);
+    for (int m = 0; m < g::MAX_CLIENTS; ++m)
+        if (m != n) SendBanner(m, text, false);
+    g::Com_Printf("^3COOP: el jugador %d se desconect\xf3\n", n + 1);
+    CheckPathLists("despues de ClientDisconnect");
+}
+
+// se llama cuando ya no quedan paquetes por leer (asi una traba larga del host no suelta a nadie). Tambien manda
+// M_PING cada segundo: en pausa (pantalla de victoria, "Haz clic para iniciar") no salen snapshots.
+void HostCheckRemotes()
+{
+    DWORD now = GetTickCount();
+    static DWORD lastPing;
+    bool ping = now - lastPing > 1000;
+    if (ping) lastPing = now;
+    for (int n = 1; n < g::MAX_CLIENTS; ++n) {
+        if (!S->remote[n].active || !PlayerInGame(n)) {
+            g_lastSeen[n] = 0;
+            continue;
+        }
+        if (ping) {
+            Writer w(M_PING);
+            SendTo(S->remote[n].addr, w.buf, w.len);
+        }
+        if (!g_lastSeen[n]) g_lastSeen[n] = now;  // recien entrado o nucleo recargado
+        if (now - g_lastSeen[n] > REMOTE_TIMEOUT) HostDropRemote(n);
+    }
+}
+
 // Antes de que el host cargue un mapa (el checkpoint o uno nuevo) se sueltan los remotos y los cuerpos. Si quedaran
 // conectados, la carga les manda comandos que nadie confirma ("Reliable command buffer overflow"); los arboles se
 // liberan ahora, mientras su memoria sigue siendo valida. Los remotos cargan `map` y se vuelven a unir solos.
@@ -1721,6 +1768,32 @@ void JoinerControl(uint8_t type, Reader r)
         break;
     }
     }
+}
+
+// Remoto conectado: M_PING al host cada segundo (con el menu abierto no salen usercmds) y, si el host no manda
+// nada en HOST_TIMEOUT (se cerro o se corto), vuelta al menu principal.
+void JoinerKeepAlive()
+{
+    if (!S->joined) return;
+    DWORD now = GetTickCount();
+    static DWORD lastPing;
+    if (now - lastPing > 1000) {
+        Writer w(M_PING);
+        SendTo(S->host, w.buf, w.len);
+        lastPing = now;
+    }
+    if (!g_hostSeen) g_hostSeen = now;  // nucleo recien recargado
+    if (now - g_hostSeen < HOST_TIMEOUT) return;
+    Log("joiner: el host no responde hace %lu ms, vuelvo al menu", now - g_hostSeen);
+    for (int e = 0; e < g::MAX_GENTITIES; ++e)
+        if (S->ownTree[e]) JoinerFreeDObj(e);
+    S->joined = S->frozen = false;
+    S->role = NONE;
+    g_hostSeen = 0;
+    memset(S->downed, 0, sizeof S->downed);
+    g::Com_Printf("^1COOP: se perdi\xf3 la conexi\xf3n con el anfitri\xf3n\n");
+    CoopStatus("Se perdi\xf3 la conexi\xf3n con el anfitri\xf3n.");
+    g::Cbuf_AddText("disconnect\n");
 }
 
 // ---------- comandos de consola ----------
@@ -2109,7 +2182,16 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
         sockaddr_in a;
         int alen = sizeof a;
         int n = recvfrom(S->sock, (char*)buf, sizeof buf, 0, (sockaddr*)&a, &alen);
-        if (n <= 0) return 0;
+        if (n <= 0) {
+            if (S->role == HOST) HostCheckRemotes();
+            return 0;
+        }
+        if (S->role == HOST) {
+            int slot = FindSlot(a);
+            if (slot > 0) g_lastSeen[slot] = GetTickCount();
+        } else if (a.sin_addr.s_addr == S->host.sin_addr.s_addr && a.sin_port == S->host.sin_port) {
+            g_hostSeen = GetTickCount();
+        }
         if (n >= 5 && *(uint32_t*)buf == CTRL) {
             ++g_statCtrl;
             Reader r{buf + 5, buf + n};
@@ -2189,6 +2271,8 @@ EXPORT int __cdecl Coop_FrozenFrame(int msec)
     HookCgame(true);
     HookUsercmd(true);
     JoinerSkipPregame();
+    JoinerKeepAlive();
+    if (!S->frozen) return 0;  // se perdio el host
     DrawTeamOnCompass(g_team, g_teamPos, S->slot);
     int& t = S->frozenTime;
     int latest = *(int*)0x1426e68;  // cl.snap.serverTime

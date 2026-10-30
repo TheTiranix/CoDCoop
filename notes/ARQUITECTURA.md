@@ -161,6 +161,14 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   La carga de un checkpoint no muestra esa pantalla en el host (la carga de partida deja cl_paused 0).
 - tools\mem.py <pid> <dir> | s:<dir> | cv:<dir>: lee memoria de un juego abierto. En PowerShell `rd` es borrar.
 
+## Desconexiones (tarea 3.3)
+- vmMain del juego SP: 2 ClientConnect, 3 ClientBegin, 4 ClientDisconnect (G_FreeEntity del jugador), 5
+  ClientCommand, 6 ClientThink (no es el orden de Quake 3).
+- El host anota el ultimo paquete de cada remoto (Coop_GetPacket) y lo suelta tras 8 s sin nada: cuerpo,
+  vmMain 4, slot libre, cartel a los demas. Se revisa cuando ya no quedan paquetes por leer.
+- M_PING cada segundo en los dos sentidos: el remoto con su menu abierto no manda usercmds, y el host en pausa
+  (victoria, "Haz clic para iniciar") no manda snapshots. El remoto sin noticias del host en 15 s vuelve al menu.
+
 ## Menu "Cooperativo"
 - El juego solo carga pk3 que empiezan con "pak" (orden: pakb > ... > pak0 > carpeta > localized_*): el menu
   modificado va en game\Main\pakz_coop.pk3 y le gana a localized_spanish_pak0.pk3 (que tiene ui/main.menu).
