@@ -170,6 +170,11 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   actual (ent+0xe0), G_EntUnlink 0x44d70 (ESI ent). Llamarlas con currentVM = gvm e inGameCall 1.
 - HostVehicles: cada frame, si el padre del host cambia, los remotos se sueltan y se enganchan al mismo padre y
   tag desde el costado del host. Enganchados quedan pm_type 1 (pueden mirar y disparar).
+- Armas: en el tanque el host tiene un arma de vehiculo (WeaponDef+0x74 clase 6 ametralladora, 7 cañon), que no
+  se copia. Un pasajero sin arma recibe la primera aliada que el nivel registro (gamex86+0x12eea0[arma] != 0;
+  tabla *(+0x125650), +4 nombre, +0x198 municion maxima, +0x1a0 indice de municion) con lo mismo que giveweapon
+  (0x15020): 0xb3e0 lugar libre (ECX arma, EDX ps), 0xb000 dar (EAX arma, ESI ps), 0x1a940 municion (EAX ent;
+  arma, cantidad, llenar). `coopweapons` lista las registradas.
 
 ## Cambios de mapa (tarea 3.2)
 - Fin de nivel del script: changelevel(map) / missionSuccess(map) (gamex86 0x200359b0 / 0x20035b00) guardan el

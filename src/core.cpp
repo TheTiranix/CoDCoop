@@ -241,6 +241,16 @@ void FixClientNum(int n)
 // El script de la mision solo arma a level.player: si un remoto no tiene armas (al entrar o al
 // reaparecer) recibe el mismo equipo que el host. ps: +0xa0 arma actual, +0xf4 ammo[64],
 // +0x1f4 cargador[64], +0x2f4 bits de armas, +0x2fc ranuras[6] (ver giveweapon gamex86 RVA 0x15020).
+// arma de vehiculo (clase 6 ametralladora / 7 cañon del tanque): no se copia ni cuenta como arma en la mano
+bool VehicleWeapon(int w)
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    uint8_t** defs = game ? *(uint8_t***)(game + 0x125650) : nullptr;
+    if (!defs || w <= 0 || w >= 64 || !defs[w]) return false;
+    int cls = *(int*)(defs[w] + 0x74);
+    return cls == 6 || cls == 7;
+}
+
 void GiveHostLoadout(int n)
 {
     uint8_t* gameClients = *(uint8_t**)0x152bc64;
@@ -248,9 +258,73 @@ void GiveHostLoadout(int n)
     uint8_t* host = gameClients;
     uint8_t* ps = gameClients + n * *(int*)0x152bc68;
     if (*(int*)(ps + 0xa0) || !*(int*)(host + 0xa0)) return;  // ya tiene un arma en la mano, o el host tampoco
+    if (VehicleWeapon(*(int*)(host + 0xa0))) return;          // el host va en el tanque: ver HostVehicles
     if (!*(uint64_t*)(ps + 0x2f4)) memcpy(ps + 0xf4, host + 0xf4, 0x304 - 0xf4);
     *(int*)(ps + 0xa0) = *(int*)(host + 0xa0);
     Log("jugador %d: recibe el equipo del host (arma %d)", n, *(int*)(ps + 0xa0));
+}
+
+// Armas que el nivel registro (sus modelos estan cargados): gamex86 +0x12eea0 itemRegistered[arma] (arma =
+// item), WeaponDef en *(+0x125650) (cantidad +0x12564c): +4 nombre, +0x74 clase (6/7 no se dan, como en
+// giveweapon), +0x198 municion maxima, +0x1a0 indice de municion. ps: +0xf4 municion, +0x2f4 armas (64 bits).
+// Devuelve la primera aliada que encuentre, si no cualquiera; 0 si no hay.
+int PickLoadedWeapon(uint8_t* game)
+{
+    uint8_t** defs = *(uint8_t***)(game + 0x125650);
+    int count = *(int*)(game + 0x12564c), *registered = (int*)(game + 0x12eea0);
+    static const char* const kPreferred[] = {"ppsh", "mosin", "thompson", "bar", "m1garand", "m1carbine", "sten",
+                                             "enfield", "mp40", "mp44", "kar98k", ""};
+    for (const char* want : kPreferred)
+        for (int w = 1; w <= count && w < 64; ++w) {
+            if (!registered[w] || !defs[w]) continue;
+            int cls = *(int*)(defs[w] + 0x74);
+            const char* name = SafeStr(*(char**)(defs[w] + 4));
+            if (cls != 6 && cls != 7 && strstr(name, want)) return w;
+        }
+    return 0;
+}
+
+// como giveweapon (gamex86 0x15020): 0x2000b3e0 lugar libre (ECX arma, EDX ps), 0x2000b000 dar (EAX arma, ESI ps),
+// 0x2001a940 municion (EAX ent; arma, cantidad, llenar cargador). Ademas la pone en la mano.
+void GiveWeapon(uint8_t* game, int n, int w)
+{
+    uint8_t* ent = g::Entity(n);
+    uint8_t* ps = *(uint8_t**)(ent + 0x104);
+    uint8_t* def = (*(uint8_t***)(game + 0x125650))[w];
+    int slot, ecx = w;
+    uint8_t* edx = ps;
+    asm volatile("call *%3" : "=a"(slot), "+c"(ecx), "+d"(edx) : "r"(game + 0xb3e0) : "memory");
+    if (!slot) {
+        Log("jugador %d: sin lugar para el arma %d", n, w);
+        return;
+    }
+    int eax = w;
+    uint8_t* esi = ps;
+    asm volatile("call *%2" : "+a"(eax), "+S"(esi) : "r"(game + 0xb000) : "ecx", "edx", "memory");
+    int amount = *(int*)(def + 0x198) - *(int*)(ps + 0xf4 + *(int*)(def + 0x1a0) * 4);
+    if (amount > 0) {
+        uint8_t* a = ent;
+        asm volatile("push %3\n\tpush %2\n\tpush %1\n\tcall *%4\n\tadd $12, %%esp"
+                     : "+a"(a)
+                     : "g"(w), "g"(amount), "g"(1), "r"(game + 0x1a940)
+                     : "ecx", "edx", "memory");
+    }
+    *(int*)(ps + 0xa0) = w;
+    Log("jugador %d: recibe el arma %s (%d)", n, SafeStr(*(char**)(def + 4)), w);
+}
+
+// prueba: coopweapons -> armas que el nivel registro
+void Cmd_CoopWeapons()
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    if (!game) return;
+    uint8_t** defs = *(uint8_t***)(game + 0x125650);
+    int count = *(int*)(game + 0x12564c), *registered = (int*)(game + 0x12eea0);
+    for (int w = 1; w <= count && w < 64; ++w)
+        if (defs[w] && registered[w])
+            Log("arma %d: %s clase %d mundo %s", w, SafeStr(*(char**)(defs[w] + 4)), *(int*)(defs[w] + 0x74),
+                SafeStr(*(char**)(defs[w] + 0x188)));
+    Log("arma elegida para pasajeros: %d", PickLoadedWeapon(game));
 }
 
 // Brazos en primera persona (ps+0xac viewmodelIndex): el script del nivel hace setviewmodel solo al jugador 0 y el
@@ -1237,6 +1311,7 @@ void EntUnlink(uint8_t* fn, uint8_t* ent)
 }
 
 uint8_t* g_linkFailed[g::MAX_CLIENTS];
+uint8_t* g_weaponTried[g::MAX_CLIENTS];
 
 void HostVehicles()
 {
@@ -1253,6 +1328,17 @@ void HostVehicles()
         if (!S->remote[n].active || !PlayerInGame(n)) continue;
         uint8_t* ent = g::Entity(n);
         uint8_t* link = *(uint8_t**)(ent + 0x294);
+        // pasajero con las manos vacias (tanques: el host no tiene arma de infanteria): un arma del nivel
+        int& held = *(int*)(PlayerState(n) + 0xa0);
+        if (parent && (!held || VehicleWeapon(held)) && g_weaponTried[n] != parent) {
+            if (held) {  // el cañón copiado del host antes de este arreglo: fuera de la mano y de la lista
+                *(uint32_t*)(PlayerState(n) + 0x2f4 + held / 32 * 4) &= ~(1u << (held % 32));
+                held = 0;
+            }
+            g_weaponTried[n] = parent;
+            if (int w = PickLoadedWeapon(game)) GiveWeapon(game, n, w);
+            else Log("jugador %d: el nivel no tiene armas de infanteria cargadas", n);
+        }
         if ((link ? *(uint8_t**)link : nullptr) == parent) continue;
         if (link) {
             EntUnlink(game + 0x44d70, ent);
@@ -1917,7 +2003,7 @@ const CmdDef kCmds[] = {
     {"coopdobj", Cmd_CoopDObj}, {"coopgod", Cmd_CoopGod},   {"cooplook", Cmd_CoopLook}, {"coopstate", Cmd_CoopState},
     {"coopbodydraw", Cmd_CoopBodyDraw}, {"coopanims", Cmd_CoopAnims}, {"coopcmd", Cmd_CoopCmd}, {"coopent", Cmd_CoopEnt},
     {"coophealth", Cmd_CoopHealth}, {"coopkill", Cmd_CoopKill}, {"cooplists", Cmd_CoopLists},
-    {"cooprejoin", Cmd_CoopRejoin}, {"coopendlevel", Cmd_CoopEndLevel},
+    {"cooprejoin", Cmd_CoopRejoin}, {"coopendlevel", Cmd_CoopEndLevel}, {"coopweapons", Cmd_CoopWeapons},
 };
 
 }  // namespace
