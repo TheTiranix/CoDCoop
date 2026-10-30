@@ -50,7 +50,8 @@ _CallVM:
 namespace {
 
 constexpr uint32_t CTRL = 0xFFFFFFFE;  // prefijo de nuestros paquetes; el motor usa -1 (sin conexion) o una secuencia
-enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CS = 'C', M_CSDONE = 'G', M_ENTS = 'E', M_DOBJ = 'D', M_ANIM = 'N' };
+enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CS = 'C', M_CSDONE = 'G', M_ENTS = 'E', M_DOBJ = 'D', M_ANIM = 'N',
+                 M_DOWNED = 'W', M_RELOAD = 'R' };
 constexpr int ANIM_STATE = 22;  // estado cliente de un XAnimInfo: +0x1c(4) +0x24(2) +0x28..+0x37(16)
 constexpr int MAX_PACKET = 1400;
 
@@ -68,7 +69,7 @@ struct Remote {
 
 // Todo lo que tiene que sobrevivir a una recarga del nucleo. La memoria la guarda ddraw.dll; si cambia
 // el tamaño o STATE_VERSION, el cargador la pone en cero (se pierde la conexion).
-constexpr uint32_t STATE_VERSION = 2;
+constexpr uint32_t STATE_VERSION = 3;
 struct State {
     int role;
     SOCKET sock;
@@ -82,6 +83,8 @@ struct State {
     char hostMap[64];
     uint8_t* ownTree[g::MAX_GENTITIES];  // arboles de animacion creados por nosotros
     uint8_t* bodyTree[g::MAX_CLIENTS];   // host: arbol del cuerpo del jugador n (0 = sin cuerpo)
+    bool downed[g::MAX_CLIENTS];         // host: caido esperando que lo levanten
+    float reviveTime[g::MAX_CLIENTS];    // host: segundos que un compañero lleva levantandolo
     char cs[g::MAX_CONFIGSTRINGS][1024];
 };
 State* S;
@@ -93,6 +96,8 @@ struct ModelEntry {  // lo que recibe Com_ServerDObjCreate (0x476e00 resuelve ta
     uint16_t pad;
 };
 
+int BrokenPathLists(int* lists = nullptr);
+
 // diagnostico: contadores que se vuelcan al log cada 5 s
 int g_statSnaps, g_statEnts, g_statRecv, g_statCtrl;
 void StatsTick()
@@ -100,6 +105,12 @@ void StatsTick()
     static DWORD last;
     if (GetTickCount() - last < 5000) return;
     last = GetTickCount();
+    if (S->role == HOST) {
+        static int lastBad;
+        int bad = BrokenPathLists();
+        if (bad != lastBad) Log("listas de caminos rotas: %d -> %d", lastBad, bad);
+        lastBad = bad;
+    }
     if (g_statSnaps || g_statEnts || g_statRecv || g_statCtrl) {
         Log("stats 5s: snaps=%d ents=%d recv=%d ctrl=%d cls.state=%d serverMsgSeq=%d cl.snap(time=%d num=%d)", g_statSnaps,
             g_statEnts, g_statRecv, g_statCtrl, g::cls_state, *(int*)0x14795c4, *(int*)0x1426e68, *(int*)0x1426e6c);
@@ -242,11 +253,42 @@ void GiveHostLoadout(int n)
     Log("jugador %d: recibe el equipo del host (arma %d)", n, *(int*)(ps + 0xa0));
 }
 
+// diagnostico: cuantas listas de enlaces de caminos (gentity+0x2b6) estan rotas (ver Cmd_CoopLists)
+int BrokenPathLists(int* lists)
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    if (!game || !g::sv_gentities) return 0;
+    uint8_t* nodes = *(uint8_t**)(game + 0x2dc1c0);
+    int bad = 0, count = 0;
+    for (int e = 0; e < g::sv_numEntities; ++e) {
+        uint8_t* ent = g::Entity(e);
+        uint16_t head = *(uint16_t*)(ent + 0x2b6), cur = head;
+        if (!head) continue;
+        ++count;
+        int steps = 0;
+        do {
+            uint16_t next = *(uint16_t*)(nodes + cur * 8 + 6);
+            if (!next || *(uint16_t*)(nodes + next * 8 + 4) != cur || ++steps > 4096) { ++bad; break; }
+            cur = next;
+        } while (cur != head);
+    }
+    if (lists) *lists = count;
+    return bad;
+}
+
+void CheckPathLists(const char* when)
+{
+    int lists, bad = BrokenPathLists(&lists);
+    Log("listas de caminos %s: %d, rotas %d", when, lists, bad);
+}
+
 void HostJoin(const sockaddr_in& from, Reader r)
 {
     int qport = r.Get<int>(), lastIncoming = r.Get<int>(), serverCmdSeq = r.Get<int>(), relSeq = r.Get<int>();
     if (!r.Ok()) return;
     if (g::sv_state != 2) return;  // sin partida no hay a donde unirse
+    uint8_t* reloading = g::Cvar_FindVar("g_reloading");
+    if (reloading && *(int*)(reloading + 0x20)) return;  // mision fallida: esperar a que cargue el checkpoint
     int n = FindSlot(from);
     if (n < 0) {
         for (int i = 1; i < g::MAX_CLIENTS; ++i)
@@ -282,7 +324,22 @@ void HostJoin(const sockaddr_in& from, Reader r)
         *(int*)(cl + g::CL_STATE) = 1;
 
         // como SV_ClientEnterWorld (0x448e40), que tiene el ClientConnect fijo en 0
+        // ClientConnect (gamex86 RVA 0x14800) empieza reiniciando el sistema de caminos de la IA (call 0x6fde0 en
+        // RVA 0x14808): en el SP pasa una vez al cargar el mapa. Mas tarde deja a las puertas que bloquean caminos
+        // apuntando a nodos liberados, y la carga de partida se cuelga en G_FreeEntity. Para los remotos se saltea.
+        uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+        uint8_t* call = game ? game + 0x14808 : nullptr;
+        uint8_t saved[5] = {};
+        bool skip = call && call[0] == 0xE8 && call + 5 + *(int32_t*)(call + 1) == game + 0x6fde0;
+        if (skip) {
+            memcpy(saved, call, 5);
+            hook::Write((uintptr_t)call, "\x0F\x1F\x44\x00\x00", 5);  // nop de 5 bytes
+        } else {
+            Log("ClientConnect: no se encontro la llamada a la init de caminos; se llama completo");
+        }
         g::GameCall(2, n);
+        if (skip) hook::Write((uintptr_t)call, saved, 5);
+        CheckPathLists("despues de ClientConnect");
         *(uint8_t**)(cl + g::CL_GENTITY) = g::Entity(n);
         *(int*)(cl + g::CL_DELTA) = -1;
         g::GameCall(3, n);
@@ -744,12 +801,12 @@ void HookCgame(bool on)
 // ---------- animacion de los cuerpos (1.3) ----------
 
 enum BodyAnim { BA_IDLE, BA_WALK, BA_RUN, BA_BACK, BA_LEFT, BA_RIGHT, BA_CROUCH, BA_CROUCHWALK, BA_CROUCHRUN, BA_PRONE,
-                BA_CRAWL, BA_DEATH, BA_FIRE, BA_CROUCHFIRE, BA_PRONEFIRE, BA_COUNT };
+                BA_CRAWL, BA_DEATH, BA_FIRE, BA_CROUCHFIRE, BA_PRONEFIRE, BA_DOWNED, BA_COUNT };
 const char* const kBodyAnimName[BA_COUNT] = {
     "stand_aim_straight", "stand_walk_combat_loop_01", "combatrun_forward_1", "combatrun_back",
     "combatrun_left",     "combatrun_right",           "crouch_aim_straight", "crouchwalk_loop",
     "crouchrun_loop_forward_1", "prone_aim_idle",      "prone_crawl",         "death_stand_dropinplace",
-    "stand_shoot_straight", "crouch_shoot_straight",   "prone_shoot_straight",
+    "stand_shoot_straight", "crouch_shoot_straight",   "prone_shoot_straight",  "wounded_crawlidle",
 };
 constexpr int EF_FIRING = 0x400;  // eFlags mientras dispara (visto: 0x18 -> 0x418)
 
@@ -772,6 +829,7 @@ int ChooseBodyAnim(int n)
     float speed = sqrtf(v[0] * v[0] + v[1] * v[1]);
     int flags = *(int*)(ps + 0xc);
     bool firing = *(int*)(g::Entity(n) + 0x10) & EF_FIRING;
+    if (S->downed[n]) return BA_DOWNED;
     if (*(int*)(ps + 0xe4) <= 0) return BA_DEATH;
     if (flags & 1) return speed > 5 ? BA_CRAWL : firing ? BA_PRONEFIRE : BA_PRONE;
     if (flags & 2) return speed >= 5 ? (speed < 100 ? BA_CROUCHWALK : BA_CROUCHRUN) : firing ? BA_CROUCHFIRE : BA_CROUCH;
@@ -797,13 +855,8 @@ bool NewShot(int n)
     return shot;
 }
 
-void HostAnimateBodies()
+void HostAnimateBodies(float dt)
 {
-    static int lastTime;
-    int now = *(int*)0x152e930;  // sv.time
-    float dt = (now - lastTime) / 1000.0f;
-    lastTime = now;
-    if (dt < 0 || dt > 0.2f) dt = 0;
     uint8_t* xanim = FindXAnim("generic_human.atr");
     if (!xanim) return;
     int prevSide = g::inGameCall;
@@ -859,16 +912,235 @@ const uint8_t kGDamagePrologue[8] = {0x83, 0xEC, 0x18, 0x55, 0x8B, 0x6C, 0x24, 0
 GDamage_t g_origDamage;
 uint8_t* g_damageHooked;  // base de gamex86 enganchada
 
+// ---------- caido y revivir (fase 2, decision D1) ----------
+// gentity: +0x1d8 health, +0x134 flags (1 godmode, 2 notarget: la IA no lo ve, 0x20 muerto).
+// ps: +0xe4 health, +0xec maxhealth.
+constexpr int FL_NOTARGET = 0x2;
+
+bool CoopActive()
+{
+    if (S->role != HOST) return false;
+    for (int n = 1; n < g::MAX_CLIENTS; ++n)
+        if (S->remote[n].active) return true;
+    return false;
+}
+
+bool PlayerInGame(int n) { return g::svs_clients && *(int*)(g::Client(n) + g::CL_STATE) == 1; }
+uint8_t* PlayerState(int n) { return *(uint8_t**)0x152bc64 + n * *(int*)0x152bc68; }
+
+bool AnyOtherStanding(int n)
+{
+    for (int m = 0; m < g::MAX_CLIENTS; ++m)
+        if (m != n && PlayerInGame(m) && !S->downed[m] && *(int*)(g::Entity(m) + 0x1d8) > 0) return true;
+    return false;
+}
+
+void SetHealth(int n, int health)
+{
+    *(int*)(g::Entity(n) + 0x1d8) = health;
+    *(int*)(PlayerState(n) + 0xe4) = health;
+}
+
+// aviso en la consola (las ultimas lineas se ven arriba de la pantalla). Texto en Latin-1 como la fuente.
+void DownedMessage(int n, bool downed, int self)
+{
+    if (n == self)
+        g::Com_Printf(downed ? "^1COOP: est\xe1s ca\xed" "do. Esper\xe1 que un compa\xf1" "ero te levante (Usar 3 s)\n"
+                             : "^2COOP: te levantaron\n");
+    else
+        g::Com_Printf(downed ? "^1COOP: el jugador %d est\xe1 ca\xed" "do: acercate y manten\xe9 Usar 3 s\n"
+                             : "^2COOP: el jugador %d se levant\xf3\n", n + 1);
+}
+
+void SetDowned(int n, bool downed)
+{
+    S->downed[n] = downed;
+    S->reviveTime[n] = 0;
+    int& flags = *(int*)(g::Entity(n) + 0x134);
+    flags = downed ? flags | FL_NOTARGET : flags & ~FL_NOTARGET;
+    Log("jugador %d: %s", n, downed ? "caido" : "levantado");
+    DownedMessage(n, downed, 0);
+}
+
 void __cdecl Hook_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, float* dir, float* point, int damage,
                           int dflags, int mod, int hitLoc)
 {
     uint8_t* ff = g::Cvar_FindVar("coop_friendlyfire");
     bool friendlyFire = ff && *(int*)(ff + 0x20);
-    if (!friendlyFire && targ && attacker && targ != attacker && *(void**)(targ + 0x104) && *(void**)(attacker + 0x104)) {
+    bool targPlayer = targ && *(void**)(targ + 0x104);
+    if (!friendlyFire && targPlayer && attacker && targ != attacker && *(void**)(attacker + 0x104)) {
         Log("dano entre jugadores bloqueado: %d -> %d (%d)", *(uint16_t*)(attacker + 6), *(uint16_t*)(targ + 6), damage);
         return;  // un jugador no lastima a otro (si a si mismo, como en el SP)
     }
+    int n = targPlayer ? *(uint16_t*)(targ + 6) : -1;
+    if (n < 0 || n >= g::MAX_CLIENTS || !CoopActive()) {
+        g_origDamage(targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc);
+        return;
+    }
+    if (S->downed[n]) return;  // caido: ya no recibe daño
+    // El daño final depende de la zona del golpe (G_Damage lo escala): se aplica con la vida inflada para que
+    // no muera adentro, se mide cuanto bajo y recien ahi se decide entre herido, caido o muerto.
+    constexpr int BOOST = 100000;
+    int health = *(int*)(targ + 0x1d8);
+    SetHealth(n, health + BOOST);
     g_origDamage(targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc);
+    int left = *(int*)(targ + 0x1d8) - BOOST;
+    if (left > 0) {
+        SetHealth(n, left);
+    } else if (AnyOtherStanding(n)) {
+        SetHealth(n, 1);
+        SetDowned(n, true);
+    } else {
+        // Nadie mas en pie: muere el host de verdad, que es lo que dispara la mision fallida del SP y la vuelta
+        // al ultimo checkpoint para todos. Un remoto no muere nunca (su muerte recarga la mision de otra forma).
+        Log("jugador %d: cayo el ultimo en pie -> muere el host", n);
+        if (n != 0) {
+            SetHealth(n, 1);
+            SetDowned(n, true);
+        }
+        if (S->downed[0]) SetDowned(0, false);
+        SetHealth(0, 1);
+        g_origDamage(g::Entity(0), inflictor, attacker, dir, point, BOOST, dflags, mod, hitLoc);
+    }
+}
+
+// prueba: coopkill <n> <daño> -> G_Damage del mundo sobre el jugador n (con el modulo de juego como VM actual)
+void Cmd_CoopKill()
+{
+    int n = atoi(g::Argv(1)), damage = g::cmd_argc > 2 ? atoi(g::Argv(2)) : 100000;
+    if (n < 0 || n >= g::MAX_CLIENTS || !PlayerInGame(n) || !g_origDamage) return;
+    uint8_t** currentVM = (uint8_t**)0x13f9db4;
+    uint8_t* prevVM = *currentVM;
+    int prevIn = g::inGameCall;
+    *currentVM = g::gvm;
+    g::inGameCall = 1;
+    Hook_GDamage(g::Entity(n), nullptr, nullptr, nullptr, nullptr, damage, 0, 0, 0);
+    *currentVM = prevVM;
+    g::inGameCall = prevIn;
+    Log("coopkill %d %d -> vida %d", n, damage, *(int*)(g::Entity(n) + 0x1d8));
+}
+
+// Caido: solo puede mirar. Se filtra el usercmd que el juego lee con SV_GetUsercmd (0x449a10, EAX = cliente).
+// usercmd: +4 botones (1 disparar, 0x40 usar, 0x4000 cuerpo a tierra, 0x8000 agachado; el byte alto es el
+// arma), +0x14 adelante, +0x15 costado, +0x16 arriba (-127 abajo).
+}  // namespace
+extern "C" void __cdecl FilterUsercmd(int n, uint8_t* cmd)
+{
+    if (!S || n < 0 || n >= g::MAX_CLIENTS || !S->downed[n]) return;
+    uint32_t& buttons = *(uint32_t*)(cmd + 4);
+    buttons = (buttons & 0xffff0000) | 0x4000;
+    cmd[0x14] = cmd[0x15] = 0;
+    cmd[0x16] = 0x81;
+}
+// CL_GetUserCmd (0x401050): lo que el cgame usa para predecir al jugador local; sin esto el caido se
+// veria parado y disparando hasta que llega la correccion del servidor
+extern "C" void __cdecl FilterLocalUsercmd(uint8_t* cmd)
+{
+    if (S && S->role != NONE) FilterUsercmd(S->role == JOINER ? S->slot : 0, cmd);
+}
+namespace {
+
+// Levantar: un compañero en pie a menos de REVIVE_DIST manteniendo Usar REVIVE_SECONDS.
+constexpr float REVIVE_DIST = 80, REVIVE_SECONDS = 3;
+
+// prueba: coophealth <n> <vida>
+void Cmd_CoopHealth()
+{
+    int n = atoi(g::Argv(1));
+    if (n < 0 || n >= g::MAX_CLIENTS || !PlayerInGame(n)) return;
+    SetHealth(n, atoi(g::Argv(2)));
+    Log("coophealth %d = %d", n, atoi(g::Argv(2)));
+}
+
+void HostDownedFrame(float dt)
+{
+    for (int n = 0; n < g::MAX_CLIENTS; ++n) {
+        if (!S->downed[n]) continue;
+        if (!PlayerInGame(n) || !CoopActive()) { SetDowned(n, false); continue; }
+        SetHealth(n, 1);
+        const float* o = (const float*)(PlayerState(n) + 0x14);
+        int reviver = -1;
+        for (int m = 0; m < g::MAX_CLIENTS && reviver < 0; ++m) {
+            if (m == n || !PlayerInGame(m) || S->downed[m]) continue;
+            const float* p = (const float*)(PlayerState(m) + 0x14);
+            float dx = p[0] - o[0], dy = p[1] - o[1], dz = p[2] - o[2];
+            bool use = *(uint32_t*)(g::Client(m) + 0x30 + 4) & 0x40;
+            if (use && dx * dx + dy * dy + dz * dz < REVIVE_DIST * REVIVE_DIST) reviver = m;
+        }
+        float before = S->reviveTime[n];
+        S->reviveTime[n] = reviver >= 0 ? before + dt : 0;
+        if (reviver >= 0 && (int)S->reviveTime[n] != (int)before)
+            Log("jugador %d: %d levantandolo (%.0f s)", n, reviver, S->reviveTime[n]);
+        if (S->reviveTime[n] >= REVIVE_SECONDS) {
+            SetDowned(n, false);
+            SetHealth(n, *(int*)(PlayerState(n) + 0xec) / 2);
+        }
+    }
+}
+
+// SV_GetUsercmd: llama a la original (EAX = cliente, [esp+4] = destino) y despues a FilterUsercmd(n, cmd)
+}  // namespace
+extern "C" void* g_getUsercmdTramp;
+void* g_getUsercmdTramp;
+asm(R"(
+.intel_syntax noprefix
+.globl _Hook_GetUsercmd
+_Hook_GetUsercmd:
+    push eax
+    push dword ptr [esp+8]
+    call dword ptr [_g_getUsercmdTramp]
+    add esp, 4
+    push dword ptr [esp+8]
+    push dword ptr [esp+4]
+    call _FilterUsercmd
+    add esp, 8
+    pop eax
+    ret
+.globl _Hook_CLGetUserCmd
+_Hook_CLGetUserCmd:
+    push dword ptr [esp+4]
+    call dword ptr [_g_clGetUserCmdTramp]
+    add esp, 4
+    test eax, eax
+    jz 1f
+    push eax
+    push dword ptr [esp+8]
+    call _FilterLocalUsercmd
+    add esp, 4
+    pop eax
+1:  ret
+.att_syntax
+)");
+extern "C" void Hook_GetUsercmd();
+extern "C" void Hook_CLGetUserCmd();
+extern "C" void* g_clGetUserCmdTramp;
+void* g_clGetUserCmdTramp;
+namespace {
+constexpr uintptr_t SV_GET_USERCMD = 0x449a10;
+const uint8_t kGetUsercmdPrologue[6] = {0x56, 0x8B, 0xF0, 0x85, 0xF6, 0x57};
+
+constexpr uintptr_t CL_GET_USERCMD = 0x401050;
+const uint8_t kCLGetUserCmdPrologue[8] = {0x56, 0x8B, 0xF0, 0xA1, 0x18, 0xFE, 0x42, 0x01};
+
+// engancha (o restaura) una funcion del exe; el detour vive en esta DLL
+void HookExe(bool on, uintptr_t addr, const uint8_t* prologue, int len, void* detour, void*& tramp, const char* name)
+{
+    bool hooked = *(uint8_t*)addr == 0xE9;
+    if (on && !hooked) {
+        if (memcmp((void*)addr, prologue, len) != 0) return;
+        tramp = hook::Inline(addr, detour, len);
+        Log("%s enganchado", name);
+    }
+    if (!on && hooked && tramp) hook::Write(addr, prologue, len);
+}
+
+void HookUsercmd(bool on)
+{
+    if (S->role == HOST || !on)
+        HookExe(on, SV_GET_USERCMD, kGetUsercmdPrologue, sizeof kGetUsercmdPrologue, (void*)Hook_GetUsercmd,
+                g_getUsercmdTramp, "SV_GetUsercmd");
+    HookExe(on, CL_GET_USERCMD, kCLGetUserCmdPrologue, sizeof kCLGetUserCmdPrologue, (void*)Hook_CLGetUserCmd,
+            g_clGetUserCmdTramp, "CL_GetUserCmd");
 }
 
 void HookDamage(bool on)
@@ -889,6 +1161,27 @@ void HookDamage(bool on)
         *(game + G_DAMAGE_RVA) == 0xE9) {  // el detour vive en esta DLL: se restaura antes de descargarla
         hook::Write((uintptr_t)(game + G_DAMAGE_RVA), kGDamagePrologue, sizeof kGDamagePrologue);
         g_damageHooked = nullptr;
+    }
+}
+
+// Mision fallida (g_reloading 1): antes de que se cargue el checkpoint se sueltan los remotos y los cuerpos.
+// Si quedaran conectados, la carga les manda comandos que nadie confirma ("Reliable command buffer overflow");
+// los arboles se liberan ahora, mientras su memoria sigue siendo valida. Los remotos se vuelven a unir solos.
+void HostCheckReload()
+{
+    uint8_t* reloading = g::Cvar_FindVar("g_reloading");
+    if (!reloading || !*(int*)(reloading + 0x20) || !CoopActive()) return;
+    Log("host: mision fallida, se sueltan los remotos hasta que cargue el checkpoint");
+    for (int n = 0; n < g::MAX_CLIENTS; ++n) {
+        if (S->bodyTree[n]) HostFreeBody(n);
+        S->downed[n] = false;
+    }
+    for (int n = 1; n < g::MAX_CLIENTS; ++n) {
+        if (!S->remote[n].active) continue;
+        Writer w(M_RELOAD);
+        SendTo(S->remote[n].addr, w.buf, w.len);
+        *(int*)(g::Client(n) + g::CL_STATE) = 0;
+        S->remote[n].active = false;
     }
 }
 
@@ -958,8 +1251,35 @@ void JoinerControl(uint8_t type, Reader r)
     case M_ANIM:
         if (S->joined) JoinerApplyAnims(r);
         break;
-    case M_ENTS: {
+    case M_RELOAD: {
+        // El host vuelve al checkpoint y su reloj retrocede: el cgame de aca cortaria con "Server time went
+        // backwards". Se hace como al entrar: mapa local de nuevo y despues unirse (cooprejoin). Los DObj propios
+        // se liberan ahora, mientras su memoria sigue valida.
         if (!S->joined) return;
+        for (int e = 0; e < g::MAX_GENTITIES; ++e)
+            if (S->ownTree[e]) JoinerFreeDObj(e);
+        S->joined = S->frozen = false;
+        S->role = NONE;  // hasta cooprejoin: no se manda nada mientras carga
+        memset(S->downed, 0, sizeof S->downed);
+        Log("joiner: el host recarga el checkpoint, recargo %s y vuelvo a entrar", S->hostMap);
+        g::Com_Printf("^3COOP: el host vuelve al \xfaltimo checkpoint, reconectando...\n");
+        char cmd[128];
+        snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", S->hostMap);
+        g::Cbuf_AddText(cmd);
+        break;
+    }
+    case M_DOWNED: {
+        uint8_t mask = r.Get<uint8_t>();
+        for (int m = 0; m < g::MAX_CLIENTS; ++m) {
+            bool d = mask >> m & 1;
+            if (d == S->downed[m]) continue;
+            S->downed[m] = d;
+            DownedMessage(m, d, S->slot);
+        }
+        break;
+    }
+    case M_ENTS: {
+        if (!S->joined || !g::sv_gentities) return;  // sin servidor local (se cerro el mapa) no hay donde copiar
         int count = r.Get<uint16_t>();
         for (int k = 0; k < count && r.p + 2 + g::ENTSTATE_SIZE <= r.end; ++k) {
             int e = r.Get<uint16_t>();
@@ -1011,6 +1331,17 @@ void Cmd_CoopJoin()
     S->hostMap[0] = 0;
     JoinerSendJoin();
     g::Com_Printf("COOP: uniendose a %s:%d...\n", host, port);
+}
+
+// despues de recargar el mapa por M_RELOAD: volver a unirse al mismo host (lo reintenta cada 1 s)
+void Cmd_CoopRejoin()
+{
+    if (S->sock == INVALID_SOCKET || S->role != NONE || !S->host.sin_port) return;
+    S->role = JOINER;
+    S->joined = false;
+    S->hostMap[0] = 0;
+    JoinerSendJoin();
+    g::Com_Printf("COOP: volviendo a entrar...\n");
 }
 
 // Pruebas sin teclado: lo que se escriba en codcoop.cmd (o codcoop_join.cmd) va a la consola.
@@ -1150,7 +1481,8 @@ void Cmd_CoopLook()
     float yaw = atan2f(-dy, -dx) * 180.0f / 3.14159265f;
     const int* cmdAngles = (const int*)(ps + 0x73e4 + 8);  // gclient.pers.cmd.angles
     int* delta = (int*)(ps + 0x48);
-    delta[0] = -cmdAngles[0];
+    float pitch = g::cmd_argc > 4 ? (float)atof(g::Argv(4)) : 0;  // positivo = hacia abajo
+    delta[0] = ((int)(pitch * 65536 / 360) & 0xffff) - cmdAngles[0];
     delta[1] = ((int)(yaw * 65536 / 360) & 0xffff) - cmdAngles[1];
     Log("cooplook %d -> ent %d en (%.0f %.0f %.0f), yaw %.0f", n, e, o[0], o[1], o[2], yaw);
 }
@@ -1180,6 +1512,59 @@ void Cmd_CoopState()
     }
 }
 
+// prueba: coopcmd <n> -> ultimo usercmd del cliente n (client_t+0x30, 11 dwords)
+// prueba: coopent <n> -> gentity n entera (0x2c8 bytes) en una linea, para comparar antes/despues
+void Cmd_CoopCmd()
+{
+    int n = atoi(g::Argv(1));
+    if (n < 0 || n >= g::MAX_CLIENTS || !g::svs_clients) return;
+    const uint32_t* c = (const uint32_t*)(g::Client(n) + 0x30);
+    Log("usercmd %d: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x", n, c[0], c[1], c[2], c[3], c[4], c[5], c[6],
+        c[7], c[8], c[9], c[10]);
+}
+
+void Cmd_CoopEnt()
+{
+    int e = atoi(g::Argv(1));
+    if (e < 0 || e >= g::MAX_GENTITIES || !g::sv_gentities) return;
+    const uint32_t* p = (const uint32_t*)g::Entity(e);
+    char line[4096];
+    int len = 0;
+    for (int i = 0; i < g::sv_gentitySize / 4; ++i) len += snprintf(line + len, sizeof line - len, " %x:%x", i * 4, p[i]);
+    Log("ent %d:%s", e, line);
+}
+
+// prueba: cooplists -> revisa las listas circulares de nodos de cada entidad (gentity+0x2b6 cabeza, flag 0x1000;
+// nodos de 8 bytes {u16 tipo, u16 clave, u16 anterior, u16 siguiente} en *(gamex86 + 0x2dc1c0)). Si una queda
+// rota, G_FreeEntity (al cargar partida) da vueltas para siempre.
+void Cmd_CoopLists()
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    if (!game || !g::sv_gentities) return;
+    uint8_t* nodes = *(uint8_t**)(game + 0x2dc1c0);
+    int bad = 0, lists = 0;
+    for (int e = 0; e < g::sv_numEntities; ++e) {
+        uint8_t* ent = g::Entity(e);
+        uint16_t head = *(uint16_t*)(ent + 0x2b6);
+        if (!head) continue;
+        ++lists;
+        uint16_t cur = head;
+        int steps = 0;
+        bool ok = true;
+        do {
+            uint16_t next = *(uint16_t*)(nodes + cur * 8 + 6);
+            if (!next || *(uint16_t*)(nodes + next * 8 + 4) != cur || ++steps > 4096) { ok = false; break; }
+            cur = next;
+        } while (cur != head);
+        if (!ok) {
+            ++bad;
+            Log("lista rota: ent %d (eType %d flags %x) cabeza %x en el nodo %x tras %d pasos", e, ent[0],
+                *(int*)(ent + 0x134), head, cur, steps);
+        }
+    }
+    Log("cooplists: %d listas, %d rotas", lists, bad);
+}
+
 // prueba: coopanims <texto> -> hojas del arbol generic_human cuyo nombre contiene el texto.
 // XAnim: +0 nombre, +4 cantidad, +8 nodos de 8 bytes {u16 hijos, u16 padre, hoja: XAnimParts* (nombre en +0)}
 void Cmd_CoopAnims()
@@ -1206,7 +1591,9 @@ struct CmdDef {
 const CmdDef kCmds[] = {
     {"coophost", Cmd_CoopHost}, {"coopjoin", Cmd_CoopJoin}, {"coopinfo", Cmd_CoopInfo}, {"coopbring", Cmd_CoopBring},
     {"coopdobj", Cmd_CoopDObj}, {"coopgod", Cmd_CoopGod},   {"cooplook", Cmd_CoopLook}, {"coopstate", Cmd_CoopState},
-    {"coopbodydraw", Cmd_CoopBodyDraw}, {"coopanims", Cmd_CoopAnims},
+    {"coopbodydraw", Cmd_CoopBodyDraw}, {"coopanims", Cmd_CoopAnims}, {"coopcmd", Cmd_CoopCmd}, {"coopent", Cmd_CoopEnt},
+    {"coophealth", Cmd_CoopHealth}, {"coopkill", Cmd_CoopKill}, {"cooplists", Cmd_CoopLists},
+    {"cooprejoin", Cmd_CoopRejoin},
 };
 
 }  // namespace
@@ -1231,6 +1618,7 @@ EXPORT void Coop_Shutdown()
 {
     HookCgame(false);  // el puntero apunta a esta DLL, que se va a descargar
     HookDamage(false);
+    HookUsercmd(false);
     Log("nucleo descargado");
     g_api = nullptr;
 }
@@ -1266,6 +1654,7 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
     PollCmdFile();
     StatsTick();
     if (S->sock == INVALID_SOCKET) return 0;
+    if (S->role == HOST && sock == NS_SERVER) HostCheckReload();  // corre aunque el juego este en pausa
     if (!((S->role == HOST && sock == NS_SERVER) || (S->role == JOINER && sock == NS_CLIENT))) return 0;
     if (S->role == JOINER && !S->joined && GetTickCount() - S->lastJoinTry > 1000) JoinerSendJoin();
 
@@ -1298,8 +1687,15 @@ EXPORT void __cdecl Coop_HostFrame()
     if (S->role != HOST) return;
     HookCgame(true);
     HookDamage(true);
+    HookUsercmd(true);
+    static int lastTime;
+    int now = *(int*)0x152e930;  // sv.time
+    float dt = (now - lastTime) / 1000.0f;
+    lastTime = now;
+    if (dt < 0 || dt > 0.2f) dt = 0;
     HostUpdateBodies();
-    HostAnimateBodies();
+    HostAnimateBodies(dt);
+    HostDownedFrame(dt);
     uint8_t* gameClients = *(uint8_t**)0x152bc64;
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
         if (!S->god[n] || !gameClients || *(int*)(g::Client(n) + g::CL_STATE) != 1) continue;
@@ -1315,6 +1711,11 @@ EXPORT void __cdecl Coop_HostFrame()
         GiveHostLoadout(n);
         g::SV_SendClientSnapshot(cl);
         ++g_statSnaps;
+        Writer w(M_DOWNED);  // quien esta caido (el remoto filtra su prediccion y avisa)
+        uint8_t mask = 0;
+        for (int m = 0; m < g::MAX_CLIENTS; ++m) mask |= S->downed[m] << m;
+        w.Put<uint8_t>(mask);
+        SendTo(S->remote[n].addr, w.buf, w.len);
         SendEntities(n);
         SendDObjs(n);
     }
@@ -1326,6 +1727,7 @@ EXPORT int __cdecl Coop_FrozenFrame(int msec)
 {
     if (!S->frozen) return 0;
     HookCgame(true);
+    HookUsercmd(true);
     int& t = S->frozenTime;
     int latest = *(int*)0x1426e68;  // cl.snap.serverTime
     int target = latest - 50;

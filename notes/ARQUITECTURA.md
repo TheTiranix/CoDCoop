@@ -121,6 +121,26 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
 - G_Damage = gamex86 RVA 0x18800 (targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc);
   gentity +0x104 gclient, +0x108 actor, +0x129 takedamage. Enganchado (prologo de 8 bytes) para la opcion
   `coop_friendlyfire` (cvar del host, 0 por defecto). Se desengancha al descargar el nucleo.
+## Caido, revivir y checkpoint (fase 2)
+- G_Damage enganchado: con coop activo el daño a un jugador se aplica con la vida inflada (+100000) para medir
+  el daño real (escala por zona) sin que muera adentro. Letal con otro en pie -> vida 1 + caido (flags |= 2
+  notarget). Letal sin nadie en pie -> muere el HOST de verdad (mision fallida del SP). Un remoto nunca muere.
+- Caido: SV_GetUsercmd (0x449a10, EAX cliente) y CL_GetUserCmd (0x401050, prediccion local, EAX numero) se
+  filtran: sin movimiento ni botones, cuerpo a tierra. usercmd +4 botones (1 disparar, 0x40 usar, 0x4000
+  cuerpo a tierra, 0x8000 agachado), +0x14/+0x15/+0x16 adelante/costado/arriba. El host manda 'W' (mascara).
+- TRAMPA GRANDE: ClientConnect (gamex86 RVA 0x14800) llama primero a la init de caminos de la IA (0x6fde0,
+  call en RVA 0x14808). Llamarlo para un remoto a mitad del nivel deja las listas de enlaces desconectados de
+  las puertas (gentity+0x2b6, nodos en *(gamex86+0x2dc1c0)) apuntando a nodos libres y la carga de partida
+  se cuelga en G_FreeEntity. Para los remotos ese call se pisa con NOP durante el ClientConnect.
+  `cooplists` y el log cada 5 s revisan esas listas.
+- Mision fallida (g_reloading 1): el host libera cuerpos y suelta los slots remotos (si no: "Reliable command
+  buffer overflow" al cargar) y les manda 'R'; no acepta uniones hasta que g_reloading vuelve a 0. El remoto
+  libera sus DObj, recarga el mapa local (devmap) y hace cooprejoin: si siguiera con el cgame viejo cortaria
+  con "CG_ProcessSnapshots: Server time went backwards" (el reloj del host retrocede).
+- Pruebas: coophealth <n> <vida>, coopkill <n> [daño] (G_Damage del mundo con gvm como VM actual),
+  coopcmd <n>, coopent <n>, cooplook <n> <ent> [dist] [pitch]; tools\stack.ps1 <pid> (pila de un proceso
+  colgado), tools\peek.ps1 <pid> <dir> <bytes>; run.ps1 click <x> <y>.
+
 - El inicio de pathfinder deja al jugador en z=2370 con pm_type 1 (paracaidas) unos segundos: no mover jugadores
   con coopbring/cooplook antes de que aterrice (quedan flotando fuera del mapa, sin cielo).
 

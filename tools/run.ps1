@@ -45,10 +45,12 @@ switch ($What) {
     [J]::SetWindowPos($p.MainWindowHandle, [IntPtr](-2), 0, 0, 0, 0, 0x13) | Out-Null
     $A1
   }
-  'click' {  # clic en todas las ventanas de prueba ("Haz clic para iniciar" tras cargar)
+  'click' {  # clic en todas las ventanas de prueba ("Haz clic para iniciar" tras cargar); click <x> <y> en coordenadas 640x480
     Add-Type 'using System; using System.Runtime.InteropServices; public static class M { [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }'
+    $x = if ($PSBoundParameters.ContainsKey('A1')) { [int]$A1 } else { 200 }
+    $y = if ($A2) { [int]$A2 } else { 200 }
     foreach ($p in Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' }) {
-      $l = [IntPtr](200 -bor (200 -shl 16))
+      $l = [IntPtr]($x -bor ($y -shl 16))
       [M]::PostMessage($p.MainWindowHandle, 0x201, [IntPtr]1, $l) | Out-Null; Start-Sleep -Milliseconds 80
       [M]::PostMessage($p.MainWindowHandle, 0x202, [IntPtr]0, $l) | Out-Null
     }
