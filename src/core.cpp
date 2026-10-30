@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include "api.h"
 #include "game.h"
+#include "hook.h"
 
 static const CoreApi* g_api;
 
@@ -568,29 +569,59 @@ int ModelIndex(const char* name)
     return empty;
 }
 
+// Modelo del arma en la mano del jugador n: ps.weapon (+0xa0) -> WeaponDef (tabla en gamex86 RVA 0x125650,
+// ver giveweapon RVA 0x15020) -> worldModel (+0x188, "xmodel/..."). "" si no tiene arma.
+const char* WeaponModelName(int n)
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    uint8_t** defs = game ? *(uint8_t***)(game + 0x125650) : nullptr;
+    int weapon = *(int*)(*(uint8_t**)0x152bc64 + n * *(int*)0x152bc68 + 0xa0);
+    if (!defs || weapon <= 0 || weapon >= 64 || !defs[weapon]) return "";
+    const char* name = *(const char**)(defs[weapon] + 0x188);
+    if (!name || IsBadReadPtr(name, 8)) return "";
+    return _strnicmp(name, "xmodel/", 7) == 0 ? name + 7 : name;
+}
+
+int g_bodyAnim[g::MAX_CLIENTS] = {-1, -1, -1, -1};  // animacion puesta (-1 = ninguna; tras recargar se vuelve a poner)
+
 void HostCreateBody(int n)
 {
+    g_bodyAnim[n] = -1;  // arbol nuevo (puede caer en la misma direccion que el viejo)
     static const char* const kParts[g::MAX_CLIENTS][3] = {
         {"character_airborne", "basehead4_04", "gear_US_helmet"},
         {"character_airborne", "basehead_01", "gear_US_helmet_net"},
         {"character_airborne_101", "basehead2_02", "gear_US_helmet"},
         {"character_airborneslvup", "basehead3_03", "gear_US_helmet_scrim"},
     };
-    ModelEntry models[3] = {};
-    for (int k = 0; k < 3; ++k) {
-        models[k].model = g::XModelPrecache(kParts[n][k]);
-        int index = ModelIndex(kParts[n][k]);
+    const char* names[4] = {kParts[n][0], kParts[n][1], kParts[n][2], WeaponModelName(n)};
+    int count = names[3][0] ? 4 : 3;
+    ModelEntry models[4] = {};
+    for (int k = 0; k < count; ++k) {
+        models[k].model = g::XModelPrecache(names[k]);
+        int index = ModelIndex(names[k]);
         if (!models[k].model || !index) {
-            Log("cuerpo %d: falta el modelo %s", n, kParts[n][k]);
+            Log("cuerpo %d: falta el modelo %s", n, names[k]);
             return;
         }
         models[k].flags = (uint16_t)-index;
     }
+    models[3].tag = "tag_weapon_right";
     uint8_t* xanim = FindXAnim("generic_human.atr");
     uint8_t* tree = xanim ? g::XAnimCreateTree(xanim) : nullptr;
-    g::Com_ServerDObjCreate(models, 3, tree, n, 0);
+    g::Com_ServerDObjCreate(models, count, tree, n, 0);
     S->bodyTree[n] = tree;
-    Log("cuerpo %d: creado (arbol %p)", n, tree);
+    Log("cuerpo %d: creado (arbol %p, arma '%s')", n, tree, names[3]);
+}
+
+// el DObj del cuerpo tiene el arma que el jugador lleva en la mano?
+bool BodyWeaponMatches(int n)
+{
+    uint8_t* d = g::ServerDObj(n);
+    const char* want = WeaponModelName(n);
+    if (!d) return true;
+    if (!want[0]) return d[0x16] == 3;
+    uint8_t* model = d[0x16] == 4 ? *(uint8_t**)(d + 0x18 + 3 * 4) : nullptr;
+    return model && !_stricmp(SafeStr(*(char**)model), want);
 }
 
 void HostFreeBody(int n)
@@ -621,7 +652,8 @@ void HostUpdateBodies()
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
         bool want = g_bodyDraw && anyRemote && *(int*)(g::Client(n) + g::CL_STATE) == 1;
         bool has = S->bodyTree[n] != nullptr;
-        if (has && (!want || !g::serverObjMap[n])) HostFreeBody(n);  // tambien si el juego borro el DObj
+        // tambien si el juego borro el DObj, o si cambio el arma (se rearma con la nueva)
+        if (has && (!want || !g::serverObjMap[n] || !BodyWeaponMatches(n))) HostFreeBody(n);
         if (want && !S->bodyTree[n] && !g::serverObjMap[n]) HostCreateBody(n);
     }
 }
@@ -712,12 +744,14 @@ void HookCgame(bool on)
 // ---------- animacion de los cuerpos (1.3) ----------
 
 enum BodyAnim { BA_IDLE, BA_WALK, BA_RUN, BA_BACK, BA_LEFT, BA_RIGHT, BA_CROUCH, BA_CROUCHWALK, BA_CROUCHRUN, BA_PRONE,
-                BA_CRAWL, BA_DEATH, BA_COUNT };
+                BA_CRAWL, BA_DEATH, BA_FIRE, BA_CROUCHFIRE, BA_PRONEFIRE, BA_COUNT };
 const char* const kBodyAnimName[BA_COUNT] = {
     "stand_aim_straight", "stand_walk_combat_loop_01", "combatrun_forward_1", "combatrun_back",
     "combatrun_left",     "combatrun_right",           "crouch_aim_straight", "crouchwalk_loop",
     "crouchrun_loop_forward_1", "prone_aim_idle",      "prone_crawl",         "death_stand_dropinplace",
+    "stand_shoot_straight", "crouch_shoot_straight",   "prone_shoot_straight",
 };
+constexpr int EF_FIRING = 0x400;  // eFlags mientras dispara (visto: 0x18 -> 0x418)
 
 int AnimIndex(uint8_t* xanim, const char* name)
 {
@@ -737,10 +771,11 @@ int ChooseBodyAnim(int n)
     const float* v = (const float*)(ps + 0x20);
     float speed = sqrtf(v[0] * v[0] + v[1] * v[1]);
     int flags = *(int*)(ps + 0xc);
+    bool firing = *(int*)(g::Entity(n) + 0x10) & EF_FIRING;
     if (*(int*)(ps + 0xe4) <= 0) return BA_DEATH;
-    if (flags & 1) return speed > 5 ? BA_CRAWL : BA_PRONE;
-    if (flags & 2) return speed < 5 ? BA_CROUCH : speed < 100 ? BA_CROUCHWALK : BA_CROUCHRUN;
-    if (speed < 5) return BA_IDLE;
+    if (flags & 1) return speed > 5 ? BA_CRAWL : firing ? BA_PRONEFIRE : BA_PRONE;
+    if (flags & 2) return speed >= 5 ? (speed < 100 ? BA_CROUCHWALK : BA_CROUCHRUN) : firing ? BA_CROUCHFIRE : BA_CROUCH;
+    if (speed < 5) return firing ? BA_FIRE : BA_IDLE;
     float yaw = *(const float*)(g::Entity(n) + 0x48);  // apos.trBase[YAW]
     float rel = atan2f(v[1], v[0]) * 180.0f / 3.14159265f - yaw;
     rel -= 360.0f * floorf((rel + 180.0f) / 360.0f);  // a [-180, 180)
@@ -749,7 +784,18 @@ int ChooseBodyAnim(int n)
     return rel > 0 ? BA_LEFT : BA_RIGHT;
 }
 
-int g_bodyAnim[g::MAX_CLIENTS] = {-1, -1, -1, -1};  // animacion puesta (-1 = ninguna; tras recargar se vuelve a poner)
+// hubo un tiro desde la ultima vez? Cada tiro baja un cargador (ps.ammoclip[64] en +0x1f4, indexado por
+// cargador, no por arma): se mira la suma.
+bool NewShot(int n)
+{
+    static int lastClip[g::MAX_CLIENTS];
+    const int* clips = (const int*)(*(uint8_t**)0x152bc64 + n * *(int*)0x152bc68 + 0x1f4);
+    int clip = 0;
+    for (int i = 0; i < 64; ++i) clip += clips[i];
+    bool shot = clip < lastClip[n];
+    lastClip[n] = clip;
+    return shot;
+}
 
 void HostAnimateBodies()
 {
@@ -780,6 +826,14 @@ void HostAnimateBodies()
             if (index > 0) BodyAnimKnob(tree, index, 1.0f, 0.0f, 1.0f);
             else Log("cuerpo %d: no esta la animacion %s", n, kBodyAnimName[want]);
             g_bodyAnim[n] = want;
+        } else if ((want == BA_FIRE || want == BA_CROUCHFIRE || want == BA_PRONEFIRE) && NewShot(n)) {
+            // otro tiro con el boton apretado: la animacion de disparo (sin bucle) vuelve a empezar
+            int index = AnimIndex(xanim, kBodyAnimName[want]);
+            if (uint16_t idx = index > 0 ? *(uint16_t*)(tree + 8 + index * 2) : 0) {
+                uint8_t* info = g::xanimInfo + idx * 0x44;
+                *(float*)(info + 0x38) = *(float*)(info + 0x3c) = 0;
+                *(uint16_t*)(info + 0x40) = *(uint16_t*)(info + 0x42) = 0;
+            }
         }
         BodyAnimUpdate(d, dt);
         // 0x47ba90 deja el tiempo nuevo en +0x38 (ciclo +0x40) calculado desde el confirmado +0x3c (+0x42); el
@@ -793,6 +847,49 @@ void HostAnimateBodies()
         g::XAnimCloneServerToClient(tree);  // 0x44d8e0 lo hace por snapshot pero desde la entidad 4
     }
     g::inGameCall = prevSide;
+}
+
+// ---------- daño entre jugadores (opcion: set coop_friendlyfire 1 en el host) ----------
+
+// G_Damage (gamex86 RVA 0x18800): (targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc).
+// gentity +0x104 = gclient (solo jugadores). gamex86 se recarga con el mapa: se vuelve a enganchar.
+using GDamage_t = void(__cdecl*)(uint8_t*, uint8_t*, uint8_t*, float*, float*, int, int, int, int);
+constexpr uintptr_t G_DAMAGE_RVA = 0x18800;
+const uint8_t kGDamagePrologue[8] = {0x83, 0xEC, 0x18, 0x55, 0x8B, 0x6C, 0x24, 0x20};
+GDamage_t g_origDamage;
+uint8_t* g_damageHooked;  // base de gamex86 enganchada
+
+void __cdecl Hook_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, float* dir, float* point, int damage,
+                          int dflags, int mod, int hitLoc)
+{
+    uint8_t* ff = g::Cvar_FindVar("coop_friendlyfire");
+    bool friendlyFire = ff && *(int*)(ff + 0x20);
+    if (!friendlyFire && targ && attacker && targ != attacker && *(void**)(targ + 0x104) && *(void**)(attacker + 0x104)) {
+        Log("dano entre jugadores bloqueado: %d -> %d (%d)", *(uint16_t*)(attacker + 6), *(uint16_t*)(targ + 6), damage);
+        return;  // un jugador no lastima a otro (si a si mismo, como en el SP)
+    }
+    g_origDamage(targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc);
+}
+
+void HookDamage(bool on)
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    if (on && game && game != g_damageHooked) {
+        uint8_t* fn = game + G_DAMAGE_RVA;
+        if (memcmp(fn, kGDamagePrologue, sizeof kGDamagePrologue) != 0) {
+            Log("G_Damage: prologo inesperado, sin opcion de dano entre jugadores");
+            g_damageHooked = game;  // no reintentar en cada frame
+            return;
+        }
+        g_origDamage = (GDamage_t)hook::Inline((uintptr_t)fn, (void*)Hook_GDamage, sizeof kGDamagePrologue);
+        g_damageHooked = game;
+        Log("G_Damage enganchado en %p", fn);
+    }
+    if (!on && g_damageHooked && g_damageHooked == game && g_origDamage &&
+        *(game + G_DAMAGE_RVA) == 0xE9) {  // el detour vive en esta DLL: se restaura antes de descargarla
+        hook::Write((uintptr_t)(game + G_DAMAGE_RVA), kGDamagePrologue, sizeof kGDamagePrologue);
+        g_damageHooked = nullptr;
+    }
 }
 
 // ---------- joiner ----------
@@ -1038,6 +1135,7 @@ void Cmd_CoopGod()
 void Cmd_CoopLook()
 {
     int n = atoi(g::Argv(1)), e = atoi(g::Argv(2));
+    float dist = g::cmd_argc > 3 ? (float)atof(g::Argv(3)) : 150;
     uint8_t* gameClients = *(uint8_t**)0x152bc64;
     if (n < 0 || n >= g::MAX_CLIENTS || e < 0 || e >= g::MAX_GENTITIES || !gameClients) return;
     uint8_t* ps = gameClients + n * *(int*)0x152bc68;
@@ -1045,8 +1143,8 @@ void Cmd_CoopLook()
     float* o = (float*)(ps + 0x14);
     float dx = o[0] - t[0], dy = o[1] - t[1], len = sqrtf(dx * dx + dy * dy);
     if (len < 1) dx = -1, dy = 0, len = 1;
-    o[0] = t[0] + dx / len * 150;
-    o[1] = t[1] + dy / len * 150;
+    o[0] = t[0] + dx / len * dist;
+    o[1] = t[1] + dy / len * dist;
     o[2] = t[2] + 8;
     memset(ps + 0x20, 0, 12);  // velocidad
     float yaw = atan2f(-dy, -dx) * 180.0f / 3.14159265f;
@@ -1132,6 +1230,7 @@ EXPORT void Coop_Init(const CoreApi* api, void* state, int fresh)
 EXPORT void Coop_Shutdown()
 {
     HookCgame(false);  // el puntero apunta a esta DLL, que se va a descargar
+    HookDamage(false);
     Log("nucleo descargado");
     g_api = nullptr;
 }
@@ -1198,6 +1297,7 @@ EXPORT void __cdecl Coop_HostFrame()
 {
     if (S->role != HOST) return;
     HookCgame(true);
+    HookDamage(true);
     HostUpdateBodies();
     HostAnimateBodies();
     uint8_t* gameClients = *(uint8_t**)0x152bc64;

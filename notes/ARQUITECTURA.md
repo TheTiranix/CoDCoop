@@ -115,6 +115,12 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
 - Animar: 0x47d8b0 (ECX arbol, EAX anim; goalWeight, blendTime, rate, 0, 0, 0) y 0x47ccd0 (ECX DObj; dtime,
   notify) con inGameCall = 1. Sin mezcla: se apagan todos los nodos y se enciende la cadena nueva.
 - Postura: ps.pm_flags (+0xc) 1 = cuerpo a tierra, 2 = agachado. Comando `coopanims <texto>` lista las hojas.
+- Arma en la mano: ps.weapon (+0xa0) -> WeaponDef* (tabla `*(gamex86 + 0x125650)`) -> worldModel (+0x188,
+  texto "xmodel/..."), unida con tag_weapon_right. Si cambia el arma se rearma el DObj.
+- Disparo: eFlags 0x400 mientras dispara. ps.ammoclip[64] (+0x1f4) esta indexado por cargador, no por arma.
+- G_Damage = gamex86 RVA 0x18800 (targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc);
+  gentity +0x104 gclient, +0x108 actor, +0x129 takedamage. Enganchado (prologo de 8 bytes) para la opcion
+  `coop_friendlyfire` (cvar del host, 0 por defecto). Se desengancha al descargar el nucleo.
 - El inicio de pathfinder deja al jugador en z=2370 con pm_type 1 (paracaidas) unos segundos: no mover jugadores
   con coopbring/cooplook antes de que aterrice (quedan flotando fuera del mapa, sin cielo).
 
