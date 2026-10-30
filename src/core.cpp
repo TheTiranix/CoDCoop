@@ -952,6 +952,53 @@ void DownedMessage(int n, bool downed, int self)
                              : "^2COOP: el jugador %d se levant\xf3\n", n + 1);
 }
 
+// Carteles al centro de la pantalla: el host le manda "cp" a cada jugador (dura cg_centertime). Un cartel fijo
+// (caido, barra de levantar) se renueva antes de que se borre; uno suelto (aviso) se manda una vez.
+struct Banner {
+    char text[128];
+    DWORD sent;
+    bool keep;
+} g_banner[g::MAX_CLIENTS];
+
+void SendBanner(int n, const char* text, bool keep)
+{
+    if (!PlayerInGame(n)) return;
+    char cmd[160];
+    snprintf(cmd, sizeof cmd, "cp \"%s\"", text);
+    g::SV_SendServerCommand(g::Client(n), cmd);
+    Banner& b = g_banner[n];
+    snprintf(b.text, sizeof b.text, "%s", text);
+    b.sent = GetTickCount();
+    b.keep = keep;
+}
+
+void KeepBanner(int n, const char* text)  // "" borra el fijo anterior (no un aviso suelto)
+{
+    Banner& b = g_banner[n];
+    if (!*text) {
+        if (b.keep) SendBanner(n, "", false);
+        return;
+    }
+    if (b.keep && !strcmp(b.text, text) && GetTickCount() - b.sent < 2000) return;
+    SendBanner(n, text, true);
+}
+
+void AnnounceDowned(int n, bool downed)
+{
+    char text[128];
+    for (int m = 0; m < g::MAX_CLIENTS; ++m) {
+        if (m == n) {
+            if (!downed) SendBanner(m, "^2Te levantaron", false);  // caido: el cartel fijo lo pone HostDownedFrame
+        } else if (!S->downed[m]) {
+            snprintf(text, sizeof text,
+                     downed ? "^1El jugador %d est\xe1 ca\xed" "do^7\\nAcercate y manten\xe9 Usar 3 segundos"
+                            : "^2El jugador %d se levant\xf3",
+                     n + 1);
+            SendBanner(m, text, false);
+        }
+    }
+}
+
 void SetDowned(int n, bool downed)
 {
     S->downed[n] = downed;
@@ -990,6 +1037,7 @@ void __cdecl Hook_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, 
     } else if (AnyOtherStanding(n)) {
         SetHealth(n, 1);
         SetDowned(n, true);
+        AnnounceDowned(n, true);
     } else {
         // Nadie mas en pie: muere el host de verdad, que es lo que dispara la mision fallida del SP y la vuelta
         // al ultimo checkpoint para todos. Un remoto no muere nunca (su muerte recarga la mision de otra forma).
@@ -1052,8 +1100,18 @@ void Cmd_CoopHealth()
     Log("coophealth %d = %d", n, atoi(g::Argv(2)));
 }
 
+// "texto\n||||||||||" con la parte hecha en verde
+void ProgressBanner(char* out, size_t size, const char* label, float t)
+{
+    constexpr int W = 20;
+    int done = (int)(t / REVIVE_SECONDS * W);
+    done = done < 0 ? 0 : done > W ? W : done;
+    snprintf(out, size, "%s\\n^2%.*s^7%.*s", label, done, "||||||||||||||||||||", W - done, "||||||||||||||||||||");
+}
+
 void HostDownedFrame(float dt)
 {
+    int reviving[g::MAX_CLIENTS] = {-1, -1, -1, -1};  // a quien esta levantando cada jugador
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
         if (!S->downed[n]) continue;
         if (!PlayerInGame(n) || !CoopActive()) { SetDowned(n, false); continue; }
@@ -1074,7 +1132,22 @@ void HostDownedFrame(float dt)
         if (S->reviveTime[n] >= REVIVE_SECONDS) {
             SetDowned(n, false);
             SetHealth(n, *(int*)(PlayerState(n) + 0xec) / 2);
+            AnnounceDowned(n, false);
+        } else if (reviver >= 0) {
+            reviving[reviver] = n;
         }
+    }
+    for (int n = 0; n < g::MAX_CLIENTS; ++n) {
+        char text[128] = "", label[64];
+        if (S->downed[n] && S->reviveTime[n] > 0) {
+            ProgressBanner(text, sizeof text, "^2Te est\xe1n levantando", S->reviveTime[n]);
+        } else if (S->downed[n]) {
+            snprintf(text, sizeof text, "^1EST\xc1S CA\xcd" "DO^7\\nEsper\xe1 que un compa\xf1" "ero te levante");
+        } else if (reviving[n] >= 0) {
+            snprintf(label, sizeof label, "Levantando al jugador %d", reviving[n] + 1);
+            ProgressBanner(text, sizeof text, label, S->reviveTime[reviving[n]]);
+        }
+        KeepBanner(n, text);
     }
 }
 

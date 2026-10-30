@@ -137,6 +137,11 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   buffer overflow" al cargar) y les manda 'R'; no acepta uniones hasta que g_reloading vuelve a 0. El remoto
   libera sus DObj, recarga el mapa local (devmap) y hace cooprejoin: si siguiera con el cgame viejo cortaria
   con "CG_ProcessSnapshots: Server time went backwards" (el reloj del host retrocede).
+- Carteles: el host le manda a cada jugador `cp "texto"` con SV_SendServerCommand (0x44caf0, ECX = client_t,
+  0 = todos; cdecl fmt, ...). El cgame (CG_ServerCommand 0x300206d0) lo dibuja cg_centertime (3 s); `\n` (barra
+  + n, literal) corta linea, Latin-1 y ^colores andan. Cartel fijo (caido, barra de levantar) se renueva cada
+  2 s; aviso suelto (cayo / se levanto) una vez. cgame: texto en 0x30125820, hora en 0x30125814, cg.time
+  0x3011e0a4, cgs.serverCommandSequence 0x3010b894. Las capitales con tilde salen sin tilde (fuente).
 - Pruebas: coophealth <n> <vida>, coopkill <n> [daño] (G_Damage del mundo con gvm como VM actual),
   coopcmd <n>, coopent <n>, cooplook <n> <ent> [dist] [pitch]; tools\stack.ps1 <pid> (pila de un proceso
   colgado), tools\peek.ps1 <pid> <dir> <bytes>; run.ps1 click <x> <y>.

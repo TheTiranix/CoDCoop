@@ -79,6 +79,15 @@ inline const char* ConfigString(int i)
     uint16_t h = sv_configstrings[i];
     return h ? (const char*)(sl_pool + h * 8 + 4) : "";
 }
+// SV_SendServerCommand 0x44caf0: ECX = client_t (0 = todos), cdecl (fmt, ...); va por el canal confiable.
+// En el cgame (CG_ServerCommand 0x300206d0): "cp \"texto\"" = cartel al centro (\\n corta linea), "gmb" = negrita.
+inline void SV_SendServerCommand(uint8_t* cl, const char* text)
+{
+    asm volatile("push %2\n\tpush %1\n\tcall *%3\n\tadd $8, %%esp"
+                 : "+c"(cl)
+                 : "r"("%s"), "r"(text), "r"((void*)0x44caf0)
+                 : "eax", "edx", "memory");
+}
 inline void SV_SendClientSnapshot(uint8_t* cl)  // 0x44d960, client en ECX
 {
     asm volatile("call *%1" : "+c"(cl) : "r"((void*)0x44d960) : "eax", "edx", "memory");
