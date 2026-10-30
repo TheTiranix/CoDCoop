@@ -195,6 +195,15 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
 - El cursor de los menus se mueve con deltas (UI vmMain 4), no con la posicion del clic de Windows: para
   probar sin mouse, `coopuiclick <x> <y>` (vmMain 4 y 3 con K_MOUSE1 = 200).
 
+## Instalador (tarea 4.4)
+- build.bat arma build\Instalar CoD Coop.exe: instalador\installer.cpp + installer.rc (los 3 archivos del mod y
+  instalador\LEEME.txt como RCDATA 1-4). Sin dependencias: MessageBox + SHBrowseForFolder.
+- Carpeta: HKLM\SOFTWARE\Activision\Call of Duty\InstallPath (el exe es de 32 bits, lee WOW6432Node) o la elige el
+  usuario; con una carpeta como argumento no pregunta (asi se relanza con "runas" si no puede escribir).
+- No lleva manifiesto propio: el de MinGW (default-manifest.o) ya dice asInvoker, y dos manifiestos chocan al linkear.
+- Probarlo sin clics: los cuadros son #32770 con titulo "Call of Duty Coop - Instalador"; WM_COMMAND con el id del
+  boton (en el cuadro de solo "Aceptar" el id es 2, no 1).
+
 ## Vehiculos (tarea 2.7)
 - playerlinkto(veh, "tag_player", frac) (carride/truckride) y la entrada al tanque (useby -> 0x2003dfc0, que
   llama 0x44ce0 -> G_EntLinkTo) enganchan al jugador: gentity+0x294 = {padre, hermano, tag SL u16, hueso,

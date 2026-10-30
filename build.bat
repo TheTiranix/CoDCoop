@@ -14,4 +14,6 @@ if errorlevel 1 (echo NO SE PUDO COPIAR el nucleo & exit /b 1)
 fc /b build\ddraw.dll game\ddraw.dll >nul 2>nul || copy /y build\ddraw.dll game\ddraw.dll >nul 2>nul || echo AVISO: ddraw.dll en uso, los juegos abiertos siguen con el cargador viejo
 rem menu: boton "Cooperativo" (game\Main\pakz_coop.pk3; el juego solo carga pak*.pk3 y el ultimo gana)
 python -I tools\make_ui.py >nul 2>nul || echo AVISO: no se pudo armar pakz_coop.pk3 (juego abierto?)
+rem instalador: un solo .exe con los 3 archivos del mod y el LEEME adentro (instalador\installer.rc)
+windres -i instalador\installer.rc -o build\installer_res.o && g++ -std=c++17 -O2 -static -mwindows -municode -o "build\Instalar CoD Coop.exe" instalador\installer.cpp build\installer_res.o -lole32 -lshell32 || echo AVISO: no se pudo armar el instalador
 echo BUILD OK

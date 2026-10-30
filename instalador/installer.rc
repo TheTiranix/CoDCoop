@@ -1,0 +1,5 @@
+// Archivos que lleva el instalador (los ids van con FILES de installer.cpp). Rutas desde la raiz del proyecto.
+1 RCDATA "build/ddraw.dll"
+2 RCDATA "build/codcoop_core.dll"
+3 RCDATA "game/main/pakz_coop.pk3"
+4 RCDATA "instalador/LEEME.txt"
