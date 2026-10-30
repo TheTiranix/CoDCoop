@@ -161,6 +161,16 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   La carga de un checkpoint no muestra esa pantalla en el host (la carga de partida deja cl_paused 0).
 - tools\mem.py <pid> <dir> | s:<dir> | cv:<dir>: lee memoria de un juego abierto. En PowerShell `rd` es borrar.
 
+## Vehiculos (tarea 2.7)
+- playerlinkto(veh, "tag_player", frac) (carride/truckride) y la entrada al tanque (useby -> 0x2003dfc0, que
+  llama 0x44ce0 -> G_EntLinkTo) enganchan al jugador: gentity+0x294 = {padre, hermano, tag SL u16, hueso,
+  offset 12 floats, ...} (0x70 bytes), +0x298 = primer hijo; gclient+0x74c8 = fraccion de giro. Tanque ademas:
+  ent+0xf8 = numero del vehiculo, gclient+0x70 |= 0x60000, gclient+0x360 = vehiculo.
+- gamex86: G_EntLinkTo 0x44b90 (ECX ent, EAX tag, push padre), 0x45280(ent, 0) = offset desde la posicion
+  actual (ent+0xe0), G_EntUnlink 0x44d70 (ESI ent). Llamarlas con currentVM = gvm e inGameCall 1.
+- HostVehicles: cada frame, si el padre del host cambia, los remotos se sueltan y se enganchan al mismo padre y
+  tag desde el costado del host. Enganchados quedan pm_type 1 (pueden mirar y disparar).
+
 ## Cambios de mapa (tarea 3.2)
 - Fin de nivel del script: changelevel(map) / missionSuccess(map) (gamex86 0x200359b0 / 0x20035b00) guardan el
   mapa siguiente en gamex86+0x2dbd18 y piden salida (+0x2dbd00; +0x2dbd08 = con pantalla de victoria). El frame

@@ -1219,6 +1219,71 @@ void HostDownedFrame(float dt)
     }
 }
 
+// Vehiculos (D3). El script sube al jugador con playerlinkto(vehiculo, "tag_player", fraccion) (carride,
+// truckride) y lo baja con unlink(). gentity +0x294 = enganche {padre, hermano, tag (string SL u16), hueso,
+// offset...}, +0x298 = primer hijo; gclient +0x74c8 = fraccion de giro. gamex86: G_EntLinkTo 0x44b90 (ECX ent,
+// EAX tag, push padre; 1 si engancho), 0x45280(ent, 0) fija el offset desde la posicion actual, G_EntUnlink
+// 0x44d70 (ESI ent). Si el host va enganchado, los remotos van al mismo padre al costado del host (pasajeros:
+// miran y disparan); cuando se baja, se sueltan donde estan.
+int EntLinkTo(uint8_t* fn, uint8_t* ent, uint8_t* parent, const char* tag)
+{
+    int r = (int)tag;
+    asm volatile("push %2\n\tcall *%3\n\tadd $4, %%esp" : "+a"(r), "+c"(ent) : "r"(parent), "r"(fn) : "edx", "memory");
+    return r;
+}
+void EntUnlink(uint8_t* fn, uint8_t* ent)
+{
+    asm volatile("call *%1" : "+S"(ent) : "r"(fn) : "eax", "ecx", "edx", "memory");
+}
+
+uint8_t* g_linkFailed[g::MAX_CLIENTS];
+
+void HostVehicles()
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    if (!game || !CoopActive()) return;
+    uint8_t* hostLink = *(uint8_t**)(g::Entity(0) + 0x294);
+    uint8_t* parent = hostLink ? *(uint8_t**)hostLink : nullptr;
+    uint8_t** currentVM = (uint8_t**)0x13f9db4;  // como un frame del juego (los traps usan la VM actual)
+    uint8_t* prevVM = *currentVM;
+    int prevIn = g::inGameCall;
+    *currentVM = g::gvm;
+    g::inGameCall = 1;
+    for (int n = 1; n < g::MAX_CLIENTS; ++n) {
+        if (!S->remote[n].active || !PlayerInGame(n)) continue;
+        uint8_t* ent = g::Entity(n);
+        uint8_t* link = *(uint8_t**)(ent + 0x294);
+        if ((link ? *(uint8_t**)link : nullptr) == parent) continue;
+        if (link) {
+            EntUnlink(game + 0x44d70, ent);
+            Log("jugador %d: se baja del vehiculo", n);
+        }
+        if (!parent || g_linkFailed[n] == parent) continue;
+        // al costado del host (derecha, izquierda, atras) y enganchado desde ahi
+        static const float kSide[g::MAX_CLIENTS] = {0, 32, -32, 0}, kForward[g::MAX_CLIENTS] = {0, 0, 0, -40};
+        const float* h = (const float*)(PlayerState(0) + 0x14);
+        float yaw = *(float*)(g::Entity(0) + 0x48) * 3.14159265f / 180;
+        float* o = (float*)(PlayerState(n) + 0x14);
+        o[0] = h[0] + cosf(yaw) * kForward[n] + sinf(yaw) * kSide[n];
+        o[1] = h[1] + sinf(yaw) * kForward[n] - cosf(yaw) * kSide[n];
+        o[2] = h[2];
+        memset(PlayerState(n) + 0x20, 0, 12);  // velocidad
+        memcpy(ent + 0xe0, o, 12);              // r.currentOrigin: de ahi sale el offset
+        memcpy(*(uint8_t**)(ent + 0x104) + 0x74c8, *(uint8_t**)(g::Entity(0) + 0x104) + 0x74c8, 12);
+        uint16_t tagName = *(uint16_t*)(hostLink + 8);
+        const char* tag = tagName ? (const char*)(g::sl_pool + tagName * 8 + 4) : "";
+        if (EntLinkTo(game + 0x44b90, ent, parent, tag)) {
+            ((void(__cdecl*)(uint8_t*, int))(game + 0x45280))(ent, 0);
+            Log("jugador %d: sube al vehiculo del host (entidad %d, tag '%s')", n, *(uint16_t*)(parent + 6), tag);
+        } else {
+            g_linkFailed[n] = parent;  // no reintentar con el mismo padre en cada frame
+            Log("jugador %d: no se pudo enganchar al vehiculo del host", n);
+        }
+    }
+    *currentVM = prevVM;
+    g::inGameCall = prevIn;
+}
+
 // SV_GetUsercmd: llama a la original (EAX = cliente, [esp+4] = destino) y despues a FilterUsercmd(n, cmd)
 }  // namespace
 extern "C" void* g_getUsercmdTramp;
@@ -1961,6 +2026,7 @@ EXPORT void __cdecl Coop_HostFrame()
     HostUpdateBodies();
     HostAnimateBodies(dt);
     HostDownedFrame(dt);
+    HostVehicles();
     uint8_t team = 0;  // quien esta en el mapa y donde (brujula de todos)
     float teamPos[g::MAX_CLIENTS][3] = {};
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
