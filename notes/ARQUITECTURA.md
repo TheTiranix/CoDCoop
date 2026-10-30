@@ -175,6 +175,15 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
 - Remoto en pie, sin vehiculo, a mas de 2000 unidades durante 10 s -> al punto mas nuevo del rastro que no
   quede a menos de 48 del host ni de 40 de otro jugador (ps origen + velocidad 0 + r.currentOrigin).
 
+## Simulacion de internet (tarea 2.8)
+- `coopnet <ms> <perdida%>` (cvars coop_simlag / coop_simloss) en cada juego: todo envio pasa por SendTo, que
+  tira el % pedido y demora el resto en una cola (se vacia en cada Coop_GetPacket). Es por lado: 60 + 60 =
+  120 ms ida y vuelta. `coopnet 0 0` lo apaga.
+- El gamestate por UDP puede perder partes: M_CSDONE lleva cuantos configstrings no vacios mando el host; el
+  remoto los cuenta (sin borrar lo ya recibido) y si le faltan no entra y espera la proxima vuelta.
+- JoinerHijack solo entra si el servidor local ya tiene el mapa del host; si no, devmap + cooprejoin (antes un
+  gamestate a medias terminaba en error del motor y crash). M_RELOAD se manda 3 veces.
+
 ## Menu "Cooperativo"
 - El juego solo carga pk3 que empiezan con "pak" (orden: pakb > ... > pak0 > carpeta > localized_*): el menu
   modificado va en game\Main\pakz_coop.pk3 y le gana a localized_spanish_pak0.pk3 (que tiene ui/main.menu).

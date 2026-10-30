@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <deque>
+#include <vector>
 #include "api.h"
 #include "game.h"
 #include "hook.h"
@@ -176,9 +178,42 @@ sockaddr_in ToSock(const netadr_t& n)
     return a;
 }
 
+// Simulacion de internet (2.8): `coopnet <ms> <perdida%>` -> cvars coop_simlag / coop_simloss. Todo lo que este
+// juego manda sale con ese retraso y se pierde con esa probabilidad (para ida y vuelta, en los dos juegos).
+struct Delayed {
+    DWORD due;
+    sockaddr_in to;
+    std::vector<uint8_t> data;
+};
+std::deque<Delayed> g_delayed;
+
+int CvarInt(const char* name)
+{
+    uint8_t* v = g::Cvar_FindVar(name);
+    return v ? *(int*)(v + 0x20) : 0;
+}
+
+void FlushDelayed(bool all = false)
+{
+    DWORD now = GetTickCount();
+    while (!g_delayed.empty() && (all || (int)(now - g_delayed.front().due) >= 0)) {
+        const Delayed& d = g_delayed.front();
+        sendto(S->sock, (const char*)d.data.data(), (int)d.data.size(), 0, (const sockaddr*)&d.to, sizeof d.to);
+        g_delayed.pop_front();
+    }
+}
+
 void SendTo(const sockaddr_in& to, const void* data, int len)
 {
-    sendto(S->sock, (const char*)data, len, 0, (const sockaddr*)&to, sizeof to);
+    int lag = CvarInt("coop_simlag"), loss = CvarInt("coop_simloss");
+    if (loss > 0 && rand() % 100 < loss) return;
+    if (lag <= 0) {
+        FlushDelayed(true);  // si se acaba de apagar, primero lo que quedo en la cola
+        sendto(S->sock, (const char*)data, len, 0, (const sockaddr*)&to, sizeof to);
+        return;
+    }
+    g_delayed.push_back({GetTickCount() + lag, to, std::vector<uint8_t>((const uint8_t*)data, (const uint8_t*)data + len)});
+    FlushDelayed();
 }
 
 // Paquete de control: [CTRL][tipo][datos]
@@ -219,17 +254,22 @@ int FindSlot(const sockaddr_in& from)
     return -1;
 }
 
+// M_CS en varios paquetes y M_CSDONE con cuantos configstrings con texto son: si al remoto le falta alguno (UDP)
+// no entra y su reintento de M_JOIN (cada 1 s) hace que se mande todo de nuevo; junta lo que llega de cada vez.
 void SendGamestate(int n)
 {
     const sockaddr_in& to = S->remote[n].addr;
     Writer w(M_CS);
+    uint16_t packets = 0, strings = 0;
     for (int i = 0; i < g::MAX_CONFIGSTRINGS; ++i) {
         const char* s = g::ConfigString(i);
         int l = (int)strlen(s);
         if (!l) continue;
+        ++strings;
         if (l > 1000) l = 1000;  // shortcut: los configstrings del SP no pasan de 1 KB, si aparece uno mas largo se trunca
         if (w.len + 4 + l > MAX_PACKET) {
             SendTo(to, w.buf, w.len);
+            ++packets;
             w = Writer(M_CS);
         }
         w.Put<uint16_t>((uint16_t)i);
@@ -237,8 +277,11 @@ void SendGamestate(int n)
         w.Put(s, l);
     }
     SendTo(to, w.buf, w.len);
+    ++packets;
     Writer done(M_CSDONE);
+    done.Put<uint16_t>(strings);
     SendTo(to, done.buf, done.len);
+    Log("host: gamestate para el jugador %d: %d configstrings en %d partes", n, strings, packets);
 }
 
 // ClientSpawn (gamex86 0x14900) borra el gclient y no vuelve a poner ps.clientNum (+0x9c): en el SP
@@ -322,6 +365,18 @@ void GiveWeapon(uint8_t* game, int n, int w)
     }
     *(int*)(ps + 0xa0) = w;
     Log("jugador %d: recibe el arma %s (%d)", n, SafeStr(*(char**)(def + 4)), w);
+}
+
+// coopnet <ms> [perdida%] -> simula internet en lo que manda este juego (0 = normal)
+void Cmd_CoopNet()
+{
+    if (g::cmd_argc < 2) {
+        g::Com_Printf("coopnet <ms> [perdida%%]  (ahora: %d ms, %d %%)\n", CvarInt("coop_simlag"), CvarInt("coop_simloss"));
+        return;
+    }
+    g::Cvar_Set("coop_simlag", g::Argv(1));
+    g::Cvar_Set("coop_simloss", g::cmd_argc > 2 ? g::Argv(2) : "0");
+    Log("coopnet: %d ms de retraso, %d %% de perdida", CvarInt("coop_simlag"), CvarInt("coop_simloss"));
 }
 
 // prueba: coopweapons -> armas que el nivel registro
@@ -1639,7 +1694,7 @@ void HostDropRemotes(const char* map)
         if (!S->remote[n].active) continue;
         Writer w(M_RELOAD);
         w.Put(map, (int)strlen(map) + 1);
-        SendTo(S->remote[n].addr, w.buf, w.len);
+        for (int k = 0; k < 3; ++k) SendTo(S->remote[n].addr, w.buf, w.len);  // UDP: el remoto atiende el primero
         *(int*)(g::Client(n) + g::CL_STATE) = 0;
         S->remote[n].active = false;
     }
@@ -1694,11 +1749,15 @@ void JoinerSendJoin()
 
 void JoinerHijack()
 {
-    if (strcmp(S->hostMap, g::CvarString("mapname")) != 0) {
-        g::Com_Printf("^1COOP: el host esta en '%s' y vos en '%s'. Carga el mismo mapa y repeti coopjoin.\n",
-                      S->hostMap, g::CvarString("mapname"));
-        Log("joiner: mapa distinto (host %s, local %s)", S->hostMap, g::CvarString("mapname"));
+    if (S->frozen) return;
+    if (g::sv_state != 2 || _stricmp(S->hostMap, g::CvarString("mapname")) != 0) {
+        // sin el mapa del host cargado (o un error del motor lo cerro): cargarlo y volver a entrar
+        Log("joiner: mapa local '%s' (servidor %d), cargo %s y vuelvo a entrar", g::CvarString("mapname"), g::sv_state,
+            S->hostMap);
         S->role = NONE;
+        char cmd[128];
+        snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", S->hostMap);
+        g::Cbuf_AddText(cmd);
         return;
     }
     S->frozen = true;                              // el servidor local queda solo para colision y assets
@@ -1735,7 +1794,6 @@ void JoinerControl(uint8_t type, Reader r)
         if (S->joined) return;
         S->slot = r.Get<int>();
         snprintf(S->hostMap, sizeof S->hostMap, "%s", MapName(r));
-        memset(S->cs, 0, sizeof S->cs);
         break;
     case M_FULL:
         g::Com_Printf("^1COOP: el host esta lleno (4 jugadores)\n");
@@ -1765,9 +1823,18 @@ void JoinerControl(uint8_t type, Reader r)
             r.p += l;
         }
         break;
-    case M_CSDONE:
-        if (!S->joined && S->hostMap[0]) JoinerHijack();
+    case M_CSDONE: {
+        int sent = r.Get<uint16_t>(), have = 0;
+        if (S->joined || !S->hostMap[0]) break;
+        for (const auto& s : S->cs) have += s[0] != 0;
+        if (r.Ok() && have < sent) {  // se perdio una parte: el reintento de M_JOIN la vuelve a pedir
+            Log("joiner: hay %d de %d configstrings, se pide de nuevo", have, sent);
+            break;
+        }
+        Log("joiner: gamestate completo (%d configstrings)", have);
+        JoinerHijack();
         break;
+    }
     case M_DOBJ:
         if (S->joined) JoinerApplyDObj(r);
         break;
@@ -1893,6 +1960,7 @@ void Cmd_CoopJoin()
     S->role = JOINER;
     S->joined = false;
     S->hostMap[0] = 0;
+    memset(S->cs, 0, sizeof S->cs);  // el gamestate se junta de los M_CS de este intento
     JoinerSendJoin();
     g::Com_Printf("COOP: uniendose a %s:%d...\n", host, port);
     CoopStatus("Buscando al anfitri\xf3n en %s:%d... (tiene que haber elegido Crear partida y estar jugando)",
@@ -1906,6 +1974,7 @@ void Cmd_CoopRejoin()
     S->role = JOINER;
     S->joined = false;
     S->hostMap[0] = 0;
+    memset(S->cs, 0, sizeof S->cs);
     JoinerSendJoin();
     g::Com_Printf("COOP: volviendo a entrar...\n");
 }
@@ -2159,7 +2228,7 @@ const CmdDef kCmds[] = {
     {"coopdobj", Cmd_CoopDObj}, {"coopgod", Cmd_CoopGod},   {"cooplook", Cmd_CoopLook}, {"coopstate", Cmd_CoopState},
     {"coopbodydraw", Cmd_CoopBodyDraw}, {"coopanims", Cmd_CoopAnims}, {"coopcmd", Cmd_CoopCmd}, {"coopent", Cmd_CoopEnt},
     {"coophealth", Cmd_CoopHealth}, {"coopkill", Cmd_CoopKill}, {"cooplists", Cmd_CoopLists},
-    {"cooprejoin", Cmd_CoopRejoin}, {"coopendlevel", Cmd_CoopEndLevel}, {"coopweapons", Cmd_CoopWeapons}, {"coopuiclick", Cmd_CoopUiClick},
+    {"cooprejoin", Cmd_CoopRejoin}, {"coopendlevel", Cmd_CoopEndLevel}, {"coopweapons", Cmd_CoopWeapons}, {"coopuiclick", Cmd_CoopUiClick}, {"coopnet", Cmd_CoopNet},
 };
 
 }  // namespace
@@ -2193,7 +2262,7 @@ EXPORT void Coop_Shutdown()
 
 EXPORT const char* Coop_Commands()
 {
-    static char list[256];
+    static char list[512];  // nombres de los comandos separados por espacios
     if (!list[0])
         for (const CmdDef& c : kCmds) {
             strcat(list, c.name);
@@ -2222,6 +2291,7 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
     PollCmdFile();
     StatsTick();
     if (S->sock == INVALID_SOCKET) return 0;
+    FlushDelayed();
     if (S->role == HOST && sock == NS_SERVER) {  // corre aunque el juego este en pausa
         HostCheckReload();
         HostNoPause();

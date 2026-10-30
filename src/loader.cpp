@@ -161,7 +161,7 @@ static bool LoadCore()
         fresh = 1;
     }
     init(&g_api, g_state, fresh);
-    char names[256];
+    char names[1024];  // Coop_Commands: nombres separados por espacios (el nucleo tiene lugar para 512)
     strncpy(names, commands(), sizeof names - 1);
     names[sizeof names - 1] = 0;
     for (char* t = strtok(names, " "); t; t = strtok(nullptr, " ")) RegisterCmd(t);
