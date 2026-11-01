@@ -14,7 +14,8 @@ Jugá la campaña de **Call of Duty 1 (2003)** en cooperativo con amigos: hasta 
 - **Por Steam o por IP.** Con Steam no hace falta abrir puertos: tus amigos te ven en el menú y se unen con un clic.
 - **Entrar y salir.** Si alguien se desconecta, su lugar se libera y puede volver a entrar.
 - **En pantalla.** Los compañeros aparecen en la brújula, y hay avisos de quién está caído o lo están levantando.
-- **Misma dificultad del juego.** El daño entre jugadores viene apagado y se puede activar.
+- **Misma dificultad del juego.** El daño entre jugadores viene apagado y se activa en el menú Cooperativo.
+- **Sin choques entre compañeros.** Los jugadores se pueden atravesar, así nadie queda trabado al aparecer juntos.
 
 ## Requisitos
 
@@ -35,6 +36,10 @@ El instalador copia `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pakz
 1. Abrí el Call of Duty como siempre y entrá en **Cooperativo**, en el menú principal.
 2. **Anfitrión:** tocá **Crear partida** y después elegí **Nueva Partida** o **Cargar Partida**.
 3. **Los demás:** tocá **Unirse a <nombre>** (amigos de Steam) o escribí la IP del anfitrión y tocá **Unirse**.
+
+En el mismo menú (también con la partida en curso, desde la pausa):
+- **Daño entre jugadores: Sí/No** lo decide el anfitrión.
+- **Desconectarse** saca de la partida cooperativa: el que se unió vuelve al menú principal; si lo toca el anfitrión, los demás vuelven al menú y él sigue jugando solo.
 
 ### Por Steam (sin abrir puertos)
 
@@ -57,6 +62,7 @@ El instalador copia `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pakz
 | `coopjoin <ip>[:puerto]` | Se une a la partida de esa IP |
 | `coopjoin steam:<SteamID>` | Se une por Steam a la partida de ese jugador |
 | `set coop_friendlyfire 1` | Activa el daño entre jugadores (en el anfitrión) |
+| `coopleave` | Sale de la partida cooperativa (como el botón Desconectarse) |
 
 ## Desinstalar
 

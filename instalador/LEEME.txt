@@ -17,6 +17,8 @@ Jugar
 1. Abrí el Call of Duty como siempre y entrá en "Cooperativo" (menú principal).
 2. El anfitrión toca "Crear partida" y después elige Nueva Partida o Cargar Partida.
 3. Los demás escriben la IP del anfitrión y tocan "Unirse".
+- En el mismo menú (también desde la pausa): "Daño entre jugadores" Sí/No (lo decide el
+  anfitrión) y "Desconectarse" para salir de la partida cooperativa.
 
 Por Steam (sin abrir puertos)
 - Todos con Steam abierto y el juego abierto.
