@@ -65,7 +65,7 @@ namespace {
 
 constexpr uint32_t CTRL = 0xFFFFFFFE;  // prefijo de nuestros paquetes; el motor usa -1 (sin conexion) o una secuencia
 enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CS = 'C', M_CSDONE = 'G', M_ENTS = 'E', M_DOBJ = 'D', M_ANIM = 'N',
-                 M_DOWNED = 'W', M_RELOAD = 'R', M_MAP = 'M', M_PING = 'P' };
+                 M_DOWNED = 'W', M_RELOAD = 'R', M_MAP = 'M', M_PING = 'P', M_BYE = 'B' };
 constexpr int ANIM_STATE = 22;  // estado cliente de un XAnimInfo: +0x1c(4) +0x24(2) +0x28..+0x37(16)
 constexpr int MAX_PACKET = 1400;
 
@@ -112,6 +112,7 @@ struct ModelEntry {  // lo que recibe Com_ServerDObjCreate (0x476e00 resuelve ta
 };
 
 int BrokenPathLists(int* lists = nullptr);
+void JoinerLeave(const char* why);
 
 // diagnostico: contadores que se vuelcan al log cada 5 s
 int g_statSnaps, g_statEnts, g_statRecv, g_statCtrl;
@@ -1735,7 +1736,7 @@ DWORD g_hostSeen;                  // remoto: ultimo paquete del host
 
 void HostDropRemote(int n)
 {
-    Log("host: el jugador %d no responde hace %lu ms, se libera su lugar", n, GetTickCount() - g_lastSeen[n]);
+    Log("host: se libera el lugar del jugador %d (ultimo paquete hace %lu ms)", n, GetTickCount() - g_lastSeen[n]);
     if (S->bodyTree[n]) HostFreeBody(n);
     S->downed[n] = false;
     S->remote[n].active = false;
@@ -1847,7 +1848,9 @@ void JoinerSendJoin()
 void JoinerHijack()
 {
     if (S->frozen) return;
-    if (g::sv_state != 2 || _stricmp(S->hostMap, g::CvarString("mapname")) != 0) {
+    // sv_state 1 tambien sirve: al volver a entrar sin cerrar el juego el servidor local queda en 1 con el mapa
+    // cargado, y pedir el mapa de nuevo era un ciclo sin fin
+    if (g::sv_state == 0 || _stricmp(S->hostMap, g::CvarString("mapname")) != 0) {
         // sin el mapa del host cargado (o un error del motor lo cerro): cargarlo y volver a entrar
         Log("joiner: mapa local '%s' (servidor %d), cargo %s y vuelvo a entrar", g::CvarString("mapname"), g::sv_state,
             S->hostMap);
@@ -1935,6 +1938,9 @@ void JoinerControl(uint8_t type, Reader r)
     case M_DOBJ:
         if (S->joined) JoinerApplyDObj(r);
         break;
+    case M_BYE:
+        JoinerLeave("El anfitri\xf3n cerr\xf3 la partida cooperativa.");
+        break;
     case M_ANIM:
         if (S->joined) JoinerApplyAnims(r);
         break;
@@ -2001,14 +2007,23 @@ void JoinerKeepAlive()
     if (!g_hostSeen) g_hostSeen = now;  // nucleo recien recargado
     if (now - g_hostSeen < HOST_TIMEOUT) return;
     Log("joiner: el host no responde hace %lu ms, vuelvo al menu", now - g_hostSeen);
+    JoinerLeave("Se perdi\xf3 la conexi\xf3n con el anfitri\xf3n.");
+}
+
+// Vuelta al menu principal. Los DObj propios se olvidan (como en M_RELOAD): el servidor local corre hasta que
+// "disconnect" lo cierra y le pediria al motor los que se liberaran.
+void JoinerLeave(const char* why)
+{
     for (int e = 0; e < g::MAX_GENTITIES; ++e)
         if (S->ownTree[e]) JoinerFreeDObj(e);
     S->joined = S->frozen = false;
     S->role = NONE;
+    HookCgame(false);  // como un juego recien abierto: si no, el mapa local no termina de cargar al volver a entrar
+    HookUsercmd(false);
     g_hostSeen = 0;
     memset(S->downed, 0, sizeof S->downed);
-    g::Com_Printf("^1COOP: se perdi\xf3 la conexi\xf3n con el anfitri\xf3n\n");
-    CoopStatus("Se perdi\xf3 la conexi\xf3n con el anfitri\xf3n.");
+    g::Com_Printf("^3COOP: %s\n", why);
+    CoopStatus("%s", why);
     g::Cbuf_AddText("disconnect\n");
 }
 
@@ -2058,13 +2073,13 @@ void SteamFrame()
     }
     if (!up) return;
     steam::Poll(OnSteamJoin);
-    if (S->role == HOST && !presence) {
+    if ((S->role == HOST) != presence) {  // al crear partida y al dejar de ser anfitrion (coopleave)
+        presence = S->role == HOST;
         char connect[64];
         snprintf(connect, sizeof connect, "+coopjoin steam:%I64u", steam::MyId());
-        steam::SetPresence("codcoop", "host");
-        steam::SetPresence("connect", connect);
-        steam::SetPresence("status", "Anfitri\xc3\xb3n de CoD Coop");
-        presence = true;
+        steam::SetPresence("codcoop", presence ? "host" : "");
+        steam::SetPresence("connect", presence ? connect : "");
+        steam::SetPresence("status", presence ? "Anfitri\xc3\xb3n de CoD Coop" : "");
     }
     static DWORD lastScan;
     if (GetTickCount() - lastScan < 2000) return;
@@ -2157,6 +2172,30 @@ void Cmd_CoopJoin()
         g::Com_Printf("COOP: uniendose a %s:%d...\n", host, ntohs(S->host.sin_port));
         CoopStatus("Buscando al anfitri\xf3n en %s:%d... (tiene que haber elegido Crear partida y estar jugando)",
                    host, ntohs(S->host.sin_port));
+    }
+}
+
+// coopleave: boton "Desconectarse" del menu Cooperativo. El que se une vuelve al menu principal; el host suelta a
+// todos y deja de ser anfitrion (la partida sigue para el solo). M_BYE avisa al otro lado para que no espere el corte.
+void Cmd_CoopLeave()
+{
+    Writer w(M_BYE);
+    if (S->role == JOINER) {
+        for (int k = 0; k < 3; ++k) SendTo(S->host, w.buf, w.len);  // UDP: el host atiende el primero
+        JoinerLeave("Te desconectaste de la partida cooperativa.");
+    } else if (S->role == HOST) {
+        for (int n = 1; n < g::MAX_CLIENTS; ++n) {
+            if (!S->remote[n].active) continue;
+            for (int k = 0; k < 3; ++k) SendTo(S->remote[n].addr, w.buf, w.len);
+            if (PlayerInGame(n)) HostDropRemote(n);
+            S->remote[n].active = false;
+        }
+        S->role = NONE;
+        g_noPause = false;
+        SkipUiPauseCheck(false);  // el menu vuelve a pausar como en el SP
+        CoopStatus("Dejaste de ser anfitri\xf3n: la partida sigue solo para vos.");
+    } else {
+        CoopStatus("No est\xe1s en una partida cooperativa.");
     }
 }
 
@@ -2433,7 +2472,7 @@ const CmdDef kCmds[] = {
     {"coopbodydraw", Cmd_CoopBodyDraw}, {"coopanims", Cmd_CoopAnims}, {"coopcmd", Cmd_CoopCmd}, {"coopent", Cmd_CoopEnt},
     {"coophealth", Cmd_CoopHealth}, {"coopkill", Cmd_CoopKill}, {"cooplists", Cmd_CoopLists},
     {"cooprejoin", Cmd_CoopRejoin}, {"coopendlevel", Cmd_CoopEndLevel}, {"coopweapons", Cmd_CoopWeapons}, {"coopuiclick", Cmd_CoopUiClick}, {"coopnet", Cmd_CoopNet},
-    {"coopjoinfriend", Cmd_CoopJoinFriend}, {"coopgive", Cmd_CoopGive},
+    {"coopjoinfriend", Cmd_CoopJoinFriend}, {"coopgive", Cmd_CoopGive}, {"coopleave", Cmd_CoopLeave},
 };
 
 }  // namespace
@@ -2531,6 +2570,7 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
             ++g_statCtrl;
             Reader r{buf + 5, buf + n};
             if (S->role == HOST && buf[4] == M_JOIN) HostJoin(a, r);
+            else if (S->role == HOST && buf[4] == M_BYE && FindSlot(a) > 0) HostDropRemote(FindSlot(a));
             else if (S->role == JOINER) JoinerControl(buf[4], r);
             continue;
         }

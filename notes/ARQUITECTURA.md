@@ -273,3 +273,20 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   menu abierto sin pausa (UI vmMain 6 = UI_IS_FULLSCREEN, como 0x4103e0).
 - Cargar partida con remotos llega a HostCheckReload (g_reloading 1) con el servidor ya cerrado (svs.clients en 0,
   memoria de los cuerpos liberada): HostDropRemotes no toca nada del motor si sv_state != 2.
+
+## DObj al recargar (cierres al caer todos)
+- El juego le pide al motor el DObj de una entidad con un trap que va a 0x449bf0 y se cae si no existe. Por eso:
+  con la mision fallida el host no libera los cuerpos (la pantalla de derrota sigue corriendo frames), y el que se
+  une no libera sus DObj al recibir M_RELOAD (su servidor local corre un frame mas antes del devmap). En los dos
+  casos la carga limpia esa memoria; solo se olvidan los punteros.
+- Liberar un arbol de animacion despues de que el motor recargo los assets rompe el asignador (0x45b8f0): por eso
+  JoinerFreeDObj olvida el arbol si su XAnim ya no esta en la tabla, y JoinerApplyDObj espera si falta el XAnim.
+- Al volver a entrar sin cerrar el juego, el servidor local queda en sv_state 1 con el mapa cargado: JoinerHijack
+  lo acepta (antes pedia 2 y recargaba el mapa en un ciclo sin fin).
+- Pendiente: un punto de control guardado con un remoto conectado no carga ("G_LoadGame: client mis-match in
+  savegame"); los del principio del nivel (guardados sin remotos) si.
+
+## Menu Cooperativo: daño entre jugadores y desconectarse
+- "Daño entre jugadores" es un ITEM_TYPE_YESNO sobre coop_friendlyfire (lo usa el host).
+- "Desconectarse" = coopleave: manda M_BYE ('B', 3 veces). El remoto vuelve al menu principal (JoinerLeave); el host
+  suelta a todos (HostDropRemote), deja de ser anfitrion, vuelve a pausar como el SP y borra su rich presence.

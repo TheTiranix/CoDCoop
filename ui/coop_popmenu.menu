@@ -4,7 +4,7 @@
 		name "coop_popmenu"
 		visible 0
 		fullscreen 0
-		rect 174 95 295 290
+		rect 174 65 295 346
 		focusColor UI_FOCUS_COLOR
 		style 1
 		border 1
@@ -14,7 +14,7 @@
 		itemDef
 		{
 			name window
-			rect 0 2 295 290
+			rect 0 2 295 346
 			style WINDOW_STYLE_FILLED
 			border 1
 			bordercolor .5 .5 .5 .5
@@ -27,7 +27,7 @@
 		{
 			name backimage2fade
 			style WINDOW_STYLE_SHADER
-			rect -176 -97 642 482
+			rect -176 -67 642 482
 			background "ui/assets/fadebox.tga"
 			forecolor 0 0 0 0.4
 			backcolor 0 0 0 0.4
@@ -146,12 +146,53 @@
 			mouseExit { setitemcolor back backcolor UI_BUTTON_BACK_COLOR }
 		}
 
+		// daño entre jugadores: lo decide el anfitrion (coop_friendlyfire)
+		itemDef
+		{
+			name friendlyfire
+			type ITEM_TYPE_YESNO
+			text "Daño entre jugadores: "
+			cvar "coop_friendlyfire"
+			rect 20 136 255 20
+			style WINDOW_STYLE_FILLED
+			textalign ITEM_ALIGN_LEFT
+			textalignx 4
+			textaligny 15
+			textscale .25
+			backcolor 0 0 0 .4
+			forecolor 1 1 1 1
+			visible 1
+			action { play "mouse_click"; }
+		}
+		// salir de la partida cooperativa (coopleave): el que se une vuelve al menu, el anfitrion sigue solo
+		itemDef
+		{
+			name leave
+			text "Desconectarse"
+			type 1
+			textscale .3
+			style UI_BUTTON_STYLE
+			textstyle UI_BUTTON_TEXT_STYLE
+			rect 20 160 255 24
+			textalign 1
+			textalignx 127
+			textaligny 18
+			border UI_BUTTON_BORDER
+			bordercolor UI_BUTTON_BORDER_COLOR
+			forecolor UI_BUTTON_TEXT_COLOR
+			backcolor UI_BUTTON_BACK_COLOR
+			visible 1
+			action { play "mouse_click"; exec "coopleave"; }
+			mouseEnter { setitemcolor leave backcolor UI_BUTTON_BACK_COLOR_HOVER play "mouse_over" }
+			mouseExit { setitemcolor leave backcolor UI_BUTTON_BACK_COLOR }
+		}
+
 		// Steam: amigos que crearon partida (el mod pone los cvars cada 2 s, ver SteamFrame en src/core.cpp;
 		// coop_friendid<n> = "0" esconde el boton)
 		itemDef
 		{
 			name steaminfo
-			rect 20 138 255 16
+			rect 20 192 255 16
 			type ITEM_TYPE_TEXT
 			style 1
 			cvar "ui_coop_steam"
@@ -173,7 +214,7 @@
 			textscale .3
 			style UI_BUTTON_STYLE
 			textstyle UI_BUTTON_TEXT_STYLE
-			rect 20 156 255 22
+			rect 20 210 255 22
 			textalign 1
 			textalignx 127
 			textaligny 17
@@ -196,7 +237,7 @@
 			textscale .3
 			style UI_BUTTON_STYLE
 			textstyle UI_BUTTON_TEXT_STYLE
-			rect 20 180 255 22
+			rect 20 234 255 22
 			textalign 1
 			textalignx 127
 			textaligny 17
@@ -219,7 +260,7 @@
 			textscale .3
 			style UI_BUTTON_STYLE
 			textstyle UI_BUTTON_TEXT_STYLE
-			rect 20 204 255 22
+			rect 20 258 255 22
 			textalign 1
 			textalignx 127
 			textaligny 17
@@ -237,7 +278,7 @@
 		itemDef
 		{
 			name status
-			rect 20 232 255 56
+			rect 20 286 255 56
 			type ITEM_TYPE_TEXT
 			style 1
 			textstyle 3
