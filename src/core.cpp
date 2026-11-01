@@ -402,6 +402,15 @@ void Cmd_CoopWeapons()
     Log("arma elegida para pasajeros: %d", PickLoadedWeapon(game));
 }
 
+// prueba: coopgive <n> <arma> -> el jugador n recibe esa arma (numero de coopweapons) y la pone en la mano
+void Cmd_CoopGive()
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    int n = atoi(g::Argv(1)), w = atoi(g::Argv(2));
+    if (game && n >= 0 && n < g::MAX_CLIENTS && g::svs_clients && *(int*)(g::Client(n) + g::CL_STATE) == 1 && w > 0)
+        GiveWeapon(game, n, w);
+}
+
 // Brazos en primera persona (ps+0xac viewmodelIndex): el script del nivel hace setviewmodel solo al jugador 0 y el
 // remoto queda con el de por defecto (viewmodel_hands_us), que el nivel no cargo y se ve blanco.
 void CopyHostViewmodel(int n)
@@ -678,12 +687,26 @@ void FreeTreeInfos(uint8_t* tree)
 
 // El arbol se libera al final: DObjFree (0x477020) todavia lo usa, y el cliente suelta su referencia
 // al DObj recien en Com_SyncClientDObjs.
+uint8_t* FindXAnim(const char* name);
+bool XAnimLoaded(const uint8_t* xanim)
+{
+    for (int i = 0; i < 256; ++i)
+        if (g::xanimTable[i] == xanim) return true;
+    return false;
+}
+
 void JoinerFreeDObj(int e)
 {
     uint8_t* tree = S->ownTree[e];
     S->ownTree[e] = nullptr;
     if (g::serverObjMap[e]) g::Com_ServerDObjFree(e);
     g::Com_SyncClientDObjs();
+    // un arbol hecho con un XAnim que ya no esta en la tabla (el juego recargo los assets al volver a entrar tras un
+    // checkpoint) vive en memoria ya liberada: liberarlo de nuevo rompia el juego (0x45b8f0). Se olvida.
+    if (tree && (IsBadReadPtr(tree, 4) || !XAnimLoaded(*(uint8_t**)tree))) {
+        Log("dobj %d: arbol de antes de la recarga, se olvida", e);
+        return;
+    }
     if (tree) {
         FreeTreeInfos(tree);
         g::XAnimFreeTree(tree);
@@ -722,7 +745,10 @@ void JoinerApplyDObj(Reader r)
         return;
     }
     uint8_t* xanim = animName[0] ? FindXAnim(animName) : nullptr;
-    if (animName[0] && !xanim) Log("dobj %d: no hay arbol de animacion '%s' aca", e, animName);
+    if (animName[0] && !xanim) {  // assets recargandose (al volver a entrar): el host lo reenvia en 1 s
+        Log("dobj %d: no hay arbol de animacion '%s' aca", e, animName);
+        return;
+    }
     uint8_t* d = g::ServerDObj(e);
     bool same = d && d[0x16] == nm && (*(uint8_t**)d ? **(uint8_t***)d : nullptr) == xanim;
     for (int k = 0; same && k < nm; ++k) same = *(void**)(d + 0x18 + k * 4) == models[k].model;
@@ -1749,13 +1775,15 @@ void HostCheckRemotes()
 // Antes de que el host cargue un mapa (el checkpoint o uno nuevo) se sueltan los remotos y los cuerpos. Si quedaran
 // conectados, la carga les manda comandos que nadie confirma ("Reliable command buffer overflow"); los arboles se
 // liberan ahora, mientras su memoria sigue siendo valida. Los remotos cargan `map` y se vuelven a unir solos.
-void HostDropRemotes(const char* map)
+void HostDropRemotes(const char* map, bool freeBodies)
 {
-    // cargar partida (loadgame_continue, Guardar/Cargar) llega aca con el servidor ya cerrado: la memoria de los
-    // cuerpos ya esta liberada y svs.clients en 0. Tocarlos rompia el juego (0x45b8f0, escritura en 0xb87c).
+    // Los cuerpos se liberan solo antes de un mapa nuevo (Hook_SpawnServer). Con la mision fallida el juego sigue
+    // corriendo la pantalla de derrota y le pide al motor el DObj de los jugadores (trap -> 0x449bf0, que se cae si
+    // ya no esta); al cargar partida el servidor ya se cerro (svs.clients en 0, esa memoria liberada: 0x45b8f0). En
+    // esos casos la carga limpia todo y aca solo se olvidan.
     bool server = g::sv_state == 2 && g::svs_clients;
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
-        if (S->bodyTree[n] && server) HostFreeBody(n);
+        if (S->bodyTree[n] && server && freeBodies) HostFreeBody(n);
         S->bodyTree[n] = nullptr;
         S->downed[n] = false;
     }
@@ -1778,7 +1806,7 @@ void HostCheckReload()
     int value = reloading ? *(int*)(reloading + 0x20) : 0;
     if (value != 1 || !CoopActive()) return;
     Log("host: mision fallida (g_reloading %d), se sueltan los remotos hasta que cargue el checkpoint", value);
-    HostDropRemotes(g::CvarString("mapname"));
+    HostDropRemotes(g::CvarString("mapname"), false);
 }
 
 // SV_SpawnServer(mapa, x) (0x44c1b0; unico llamador SV_Map_f en 0x448246): fin de nivel (spmap), map/devmap en la
@@ -1789,7 +1817,7 @@ void __cdecl Hook_SpawnServer(const char* map, int x)
 {
     if (S && S->role == HOST && CoopActive()) {
         Log("host: carga el mapa %s, los remotos lo cargan y vuelven", map);
-        HostDropRemotes(map);
+        HostDropRemotes(map, true);
     }
     ((void(__cdecl*)(const char*, int))SPAWN_SERVER)(map, x);
 }
@@ -1913,13 +1941,13 @@ void JoinerControl(uint8_t type, Reader r)
     case M_RELOAD: {
         // El host carga un mapa: el checkpoint (su reloj retrocede y el cgame de aca cortaria con "Server time went
         // backwards") o el nivel siguiente. Se hace como al entrar: ese mapa local y despues unirse (cooprejoin).
-        // Los DObj propios se liberan ahora, mientras su memoria sigue valida.
+        // Los DObj propios no se liberan: el servidor local corre un frame mas antes del devmap y le pide al motor
+        // esos DObj (trap -> 0x449bf0 se caia), y despues el devmap limpia esa memoria. Solo se olvidan.
         if (!S->joined) return;
         const char* map = MapName(r);
         bool newMap = *map && _stricmp(map, S->hostMap) != 0;
         if (*map) snprintf(S->hostMap, sizeof S->hostMap, "%s", map);
-        for (int e = 0; e < g::MAX_GENTITIES; ++e)
-            if (S->ownTree[e]) JoinerFreeDObj(e);
+        memset(S->ownTree, 0, sizeof S->ownTree);
         S->joined = S->frozen = false;
         S->role = NONE;  // hasta cooprejoin: no se manda nada mientras carga
         memset(S->downed, 0, sizeof S->downed);
@@ -2405,7 +2433,7 @@ const CmdDef kCmds[] = {
     {"coopbodydraw", Cmd_CoopBodyDraw}, {"coopanims", Cmd_CoopAnims}, {"coopcmd", Cmd_CoopCmd}, {"coopent", Cmd_CoopEnt},
     {"coophealth", Cmd_CoopHealth}, {"coopkill", Cmd_CoopKill}, {"cooplists", Cmd_CoopLists},
     {"cooprejoin", Cmd_CoopRejoin}, {"coopendlevel", Cmd_CoopEndLevel}, {"coopweapons", Cmd_CoopWeapons}, {"coopuiclick", Cmd_CoopUiClick}, {"coopnet", Cmd_CoopNet},
-    {"coopjoinfriend", Cmd_CoopJoinFriend},
+    {"coopjoinfriend", Cmd_CoopJoinFriend}, {"coopgive", Cmd_CoopGive},
 };
 
 }  // namespace

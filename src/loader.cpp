@@ -3,6 +3,7 @@
 // recarga sola cuando cambia el archivo (o con `coopreload`). La memoria de estado del nucleo la
 // guarda este cargador para que la conexion sobreviva a la recarga.
 #include <windows.h>
+#include <share.h>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -332,7 +333,11 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID)
         char p[MAX_PATH];
         // una instancia que se une escribe aparte (pruebas con 2 juegos en la misma carpeta)
         snprintf(p, sizeof p, "%s%s", g_dir, strstr(GetCommandLineA(), "+coopjoin") ? "codcoop_join.log" : "codcoop.log");
-        g_log = fopen(p, "w");
+        g_log = _fsopen(p, "w", _SH_DENYWR);  // otro juego abierto desde la misma carpeta ya lo tiene: *_2.log
+        if (!g_log) {
+            strcpy(strrchr(p, '.'), "_2.log");
+            g_log = _fsopen(p, "w", _SH_DENYWR);
+        }
         Log("codcoop cargado en %s, exe base %p", GetCommandLineA(), GetModuleHandleA(nullptr));
         LoadLibraryA("ws2_32.dll");  // que winsock quede cargado aunque se descargue el nucleo
         InstallHooks();
