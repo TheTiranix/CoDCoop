@@ -78,3 +78,7 @@ Hace falta MinGW-w64 de 32 bits (i686), Python 3 y el `steam_api.dll` de 32 bits
 
 1. Poné una copia del juego en `game\` (no está en el repo) y ajustá en `build.bat` la ruta de MinGW y la de `steam_api.dll`.
 2. Corré `build.bat`. Arma `build\ddraw.dll`, `build\codcoop_core.dll`, `game\main\pakz_coop.pk3` y el instalador `build\Instalar CoD Coop.exe`.
+
+## Licencia
+
+[MIT](LICENSE). Call of Duty es de Activision y `steam_api.dll` es de Valve: no son parte de este código.
