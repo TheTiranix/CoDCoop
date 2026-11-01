@@ -49,7 +49,7 @@
 		itemDef
 		{
 			name title
-			text "Cooperativo - hasta 4 jugadores"
+			text "Co-op - up to 4 players"
 			style 0
 			textscale .25
 			textstyle ITEM_TEXTSTYLE_NORMAL
@@ -64,7 +64,7 @@
 		itemDef
 		{
 			name host
-			text "Crear partida"
+			text "Host game"
 			type 1
 			textscale .35
 			style UI_BUTTON_STYLE
@@ -88,7 +88,7 @@
 		{
 			name ip
 			type ITEM_TYPE_EDITFIELD
-			text "IP del anfitrión: "
+			text "Host IP: "
 			cvar "coop_ip"
 			maxChars 40
 			maxPaintChars 20
@@ -106,7 +106,7 @@
 		itemDef
 		{
 			name join
-			text "Unirse"
+			text "Join"
 			type 1
 			textscale .35
 			style UI_BUTTON_STYLE
@@ -127,7 +127,7 @@
 		itemDef
 		{
 			name back
-			text "Volver"
+			text "Back"
 			type 1
 			textscale .35
 			style UI_BUTTON_STYLE
@@ -151,7 +151,7 @@
 		{
 			name friendlyfire
 			type ITEM_TYPE_YESNO
-			text "Daño entre jugadores: "
+			text "Friendly fire: "
 			cvar "coop_friendlyfire"
 			rect 20 136 255 20
 			style WINDOW_STYLE_FILLED
@@ -168,7 +168,7 @@
 		itemDef
 		{
 			name leave
-			text "Desconectarse"
+			text "Disconnect"
 			type 1
 			textscale .3
 			style UI_BUTTON_STYLE

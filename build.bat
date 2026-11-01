@@ -17,6 +17,6 @@ python -I tools\make_ui.py >nul 2>nul || echo AVISO: no se pudo armar pakz_coop.
 rem Steam (Spacewar 480): steam_api.dll de 32 bits, el redistribuible que trae SteamVR (no va en el repo)
 if not exist build\steam_api.dll copy /y "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win32\steam_api.dll" build\ >nul
 fc /b build\steam_api.dll game\steam_api.dll >nul 2>nul || copy /y build\steam_api.dll game\ >nul 2>nul || echo AVISO: no se pudo copiar steam_api.dll a game\
-rem instalador: un solo .exe con los archivos del mod, steam_api.dll y el LEEME adentro (instalador\installer.rc)
-windres -i instalador\installer.rc -o build\installer_res.o && g++ -std=c++17 -O2 -static -mwindows -municode -o "build\Instalar CoD Coop.exe" instalador\installer.cpp build\installer_res.o -lole32 -lshell32 || echo AVISO: no se pudo armar el instalador
+rem instalador: un solo .exe con los archivos del mod, steam_api.dll y el README.txt adentro (installer\installer.rc)
+windres -i installer\installer.rc -o build\installer_res.o && g++ -std=c++17 -O2 -static -mwindows -municode -o "build\Install CoD Coop.exe" installer\installer.cpp build\installer_res.o -lole32 -lshell32 || echo AVISO: no se pudo armar el instalador
 echo BUILD OK

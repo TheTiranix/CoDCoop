@@ -2,7 +2,7 @@
 		itemDef
 		{
 			name coop
-			text "Cooperativo"
+			text "Co-op"
 			type ITEM_TYPE_BUTTON
 			style WINDOW_STYLE_EMPTY
 			textstyle TEXT_ON_BG_STYLE

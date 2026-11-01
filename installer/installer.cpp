@@ -5,12 +5,12 @@
 #include <shlobj.h>
 #include <string>
 
-static const wchar_t* TITLE = L"Call of Duty Coop - Instalador";
+static const wchar_t* TITLE = L"Call of Duty Coop - Setup";
 static const DWORD CODSP_SIZE = 1716224;  // CoDSP.exe 1.5: el mod usa direcciones fijas de ese exe
 
 struct File { int id; const wchar_t* dest; };
 static const File FILES[] = {
-    {1, L"ddraw.dll"}, {2, L"codcoop_core.dll"}, {3, L"main\\pakz_coop.pk3"}, {4, L"LEEME CoD Coop.txt"},
+    {1, L"ddraw.dll"}, {2, L"codcoop_core.dll"}, {3, L"main\\pakz_coop.pk3"}, {4, L"CoD Coop README.txt"},
     {5, L"steam_api.dll"},
 };
 
@@ -32,7 +32,7 @@ static std::wstring RegistryDir()
 static std::wstring PickDir()
 {
     BROWSEINFOW bi{};
-    bi.lpszTitle = L"Elegí la carpeta del Call of Duty (la que tiene CoDSP.exe):";
+    bi.lpszTitle = L"Choose the Call of Duty folder (the one with CoDSP.exe):";
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
     if (!pidl) return L"";
@@ -89,7 +89,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         if (!Exists(dir + L"\\CoDSP.exe")) dir.clear();
         else {
             int r = Msg(MB_YESNOCANCEL | MB_ICONQUESTION,
-                        L"Se va a instalar el coop en:\n" + dir + L"\n\nSí: instalar ahí\nNo: elegir otra carpeta");
+                        L"Co-op will be installed in:\n" + dir + L"\n\nYes: install there\nNo: choose another folder");
             if (r == IDCANCEL) return 0;
             if (r == IDNO) dir.clear();
         }
@@ -97,7 +97,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             dir = PickDir();
             if (dir.empty()) return 0;
             if (!Exists(dir + L"\\CoDSP.exe")) {
-                Msg(MB_ICONWARNING, L"Esa carpeta no tiene CoDSP.exe.\nElegí la carpeta donde está instalado el Call of Duty.");
+                Msg(MB_ICONWARNING, L"That folder has no CoDSP.exe.\nChoose the folder where Call of Duty is installed.");
                 dir.clear();
             }
         }
@@ -106,8 +106,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 
     WIN32_FILE_ATTRIBUTE_DATA a;
     if (GetFileAttributesExW((dir + L"\\CoDSP.exe").c_str(), GetFileExInfoStandard, &a) && a.nFileSizeLow != CODSP_SIZE &&
-        Msg(MB_YESNO | MB_ICONWARNING, L"Tu CoDSP.exe no es el de la versión 1.5 que usa el coop: puede no funcionar."
-                                       L"\n\n¿Instalar igual?") != IDYES)
+        Msg(MB_YESNO | MB_ICONWARNING, L"Your CoDSP.exe is not version 1.5, the one co-op needs: it may not work."
+                                       L"\n\nInstall anyway?") != IDYES)
         return 0;
 
     // un ddraw.dll o steam_api.dll que no es el nuestro (otro mod, arreglo de video) se guarda como .bak
@@ -127,13 +127,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if ((INT_PTR)ShellExecuteW(nullptr, L"runas", self, (L"\"" + dir + L"\"").c_str(), nullptr, SW_SHOWNORMAL) > 32)
                 return 0;
         }
-        Msg(MB_ICONERROR, std::wstring(L"No se pudo escribir ") + f.dest + L" en\n" + dir +
-                              L"\n\nSi el juego está abierto, cerralo y probá de nuevo.");
+        Msg(MB_ICONERROR, std::wstring(L"Could not write ") + f.dest + L" to\n" + dir +
+                              L"\n\nIf the game is running, close it and try again.");
         return 1;
     }
 
-    Msg(MB_ICONINFORMATION, L"Listo, el coop quedó instalado.\n\nAbrí el Call of Duty como siempre: en el menú principal "
-                            L"está el botón \"Cooperativo\".\nLas instrucciones están en \"LEEME CoD Coop.txt\", en la "
-                            L"carpeta del juego.");
+    Msg(MB_ICONINFORMATION, L"Done, co-op is installed.\n\nStart Call of Duty as usual: the main menu has a \"Co-op\" "
+                            L"button.\nInstructions are in \"CoD Coop README.txt\", in the game folder.");
     return 0;
 }

@@ -381,7 +381,7 @@ void GiveWeapon(uint8_t* game, int n, int w)
 void Cmd_CoopNet()
 {
     if (g::cmd_argc < 2) {
-        g::Com_Printf("coopnet <ms> [perdida%%]  (ahora: %d ms, %d %%)\n", CvarInt("coop_simlag"), CvarInt("coop_simloss"));
+        g::Com_Printf("coopnet <ms> [loss%%]  (now: %d ms, %d %%)\n", CvarInt("coop_simlag"), CvarInt("coop_simloss"));
         return;
     }
     g::Cvar_Set("coop_simlag", g::Argv(1));
@@ -538,7 +538,7 @@ void HostJoin(const sockaddr_in& from, Reader r)
         g::GameCall(3, n);
         FixClientNum(n);
         Log("host: jugador remoto %s:%d -> slot %d (qport %d)", inet_ntoa(from.sin_addr), ntohs(from.sin_port), n, qport);
-        g::Com_Printf("^2COOP: entro un jugador al slot %d\n", n);
+        g::Com_Printf("^2COOP: a player joined (slot %d)\n", n);
     }
     Writer w(M_ACCEPT);
     w.Put<int>(n);
@@ -1177,11 +1177,11 @@ void SetHealth(int n, int health)
 void DownedMessage(int n, bool downed, int self)
 {
     if (n == self)
-        g::Com_Printf(downed ? "^1COOP: est\xe1s ca\xed" "do. Esper\xe1 que un compa\xf1" "ero te levante (Usar 3 s)\n"
-                             : "^2COOP: te levantaron\n");
+        g::Com_Printf(downed ? "^1COOP: you are down. Wait for a teammate to revive you (Use 3 s)\n"
+                             : "^2COOP: you were revived\n");
     else
-        g::Com_Printf(downed ? "^1COOP: el jugador %d est\xe1 ca\xed" "do: acercate y manten\xe9 Usar 3 s\n"
-                             : "^2COOP: el jugador %d se levant\xf3\n", n + 1);
+        g::Com_Printf(downed ? "^1COOP: player %d is down: get close and hold Use for 3 s\n"
+                             : "^2COOP: player %d is back up\n", n + 1);
 }
 
 // Carteles al centro de la pantalla: el host le manda "cp" a cada jugador (dura cg_centertime). Un cartel fijo
@@ -1220,11 +1220,11 @@ void AnnounceDowned(int n, bool downed)
     char text[128];
     for (int m = 0; m < g::MAX_CLIENTS; ++m) {
         if (m == n) {
-            if (!downed) SendBanner(m, "^2Te levantaron", false);  // caido: el cartel fijo lo pone HostDownedFrame
+            if (!downed) SendBanner(m, "^2You were revived", false);  // caido: el cartel fijo lo pone HostDownedFrame
         } else if (!S->downed[m]) {
             snprintf(text, sizeof text,
-                     downed ? "^1El jugador %d est\xe1 ca\xed" "do^7\\nAcercate y manten\xe9 Usar 3 segundos"
-                            : "^2El jugador %d se levant\xf3",
+                     downed ? "^1Player %d is down^7\\nGet close and hold Use for 3 seconds"
+                            : "^2Player %d is back up",
                      n + 1);
             SendBanner(m, text, false);
         }
@@ -1393,11 +1393,11 @@ void HostDownedFrame(float dt)
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
         char text[128] = "", label[64];
         if (S->downed[n] && S->reviveTime[n] > 0) {
-            ProgressBanner(text, sizeof text, "^2Te est\xe1n levantando", S->reviveTime[n]);
+            ProgressBanner(text, sizeof text, "^2Being revived", S->reviveTime[n]);
         } else if (S->downed[n]) {
-            snprintf(text, sizeof text, "^1EST\xc1S CA\xcd" "DO^7\\nEsper\xe1 que un compa\xf1" "ero te levante");
+            snprintf(text, sizeof text, "^1YOU ARE DOWN^7\\nWait for a teammate to revive you");
         } else if (reviving[n] >= 0) {
-            snprintf(label, sizeof label, "Levantando al jugador %d", reviving[n] + 1);
+            snprintf(label, sizeof label, "Reviving player %d", reviving[n] + 1);
             ProgressBanner(text, sizeof text, label, S->reviveTime[reviving[n]]);
         }
         KeepBanner(n, text);
@@ -1469,7 +1469,7 @@ void HostCatchUp(float dt)
         memset(PlayerState(n) + 0x20, 0, 12);  // velocidad
         memcpy(g::Entity(n) + 0xe0, spot, 12);  // r.currentOrigin
         g_farTime[n] = 0;
-        SendBanner(n, "^3Te quedaste lejos: apareciste junto al anfitri\xf3n", false);
+        SendBanner(n, "^3You fell behind: moved next to the host", false);
     }
 }
 
@@ -1744,10 +1744,10 @@ void HostDropRemote(int n)
     *(int*)(g::Client(n) + g::CL_STATE) = 0;
     g_lastSeen[n] = 0;
     char text[96];
-    snprintf(text, sizeof text, "^3El jugador %d se desconect\xf3", n + 1);
+    snprintf(text, sizeof text, "^3Player %d disconnected", n + 1);
     for (int m = 0; m < g::MAX_CLIENTS; ++m)
         if (m != n) SendBanner(m, text, false);
-    g::Com_Printf("^3COOP: el jugador %d se desconect\xf3\n", n + 1);
+    g::Com_Printf("^3COOP: player %d disconnected\n", n + 1);
     CheckPathLists("despues de ClientDisconnect");
 }
 
@@ -1870,7 +1870,7 @@ void JoinerHijack()
     g::CL_ApplyConfigstrings(g::sv_configstrings);
     S->joined = true;
     Log("joiner: conectado al host como slot %d en %s", S->slot, S->hostMap);
-    g::Com_Printf("^2COOP: conectado al host (jugador %d)\n", S->slot + 1);
+    g::Com_Printf("^2COOP: connected to the host (player %d)\n", S->slot + 1);
 }
 
 // nombre de mapa que manda el host (va a la consola con devmap): solo letras, numeros, _ y -; si no, ""
@@ -1896,8 +1896,8 @@ void JoinerControl(uint8_t type, Reader r)
         snprintf(S->hostMap, sizeof S->hostMap, "%s", MapName(r));
         break;
     case M_FULL:
-        g::Com_Printf("^1COOP: el host esta lleno (4 jugadores)\n");
-        CoopStatus("El anfitri\xf3n ya tiene 4 jugadores.");
+        g::Com_Printf("^1COOP: the host is full (4 players)\n");
+        CoopStatus("The host already has 4 players.");
         S->role = NONE;
         break;
     case M_MAP: {  // el host esta en otro mapa: cargarlo y volver a pedir lugar
@@ -1907,8 +1907,8 @@ void JoinerControl(uint8_t type, Reader r)
         snprintf(S->hostMap, sizeof S->hostMap, "%s", map);
         S->role = NONE;  // hasta cooprejoin
         Log("joiner: el host esta en %s, lo cargo y vuelvo a entrar", map);
-        g::Com_Printf("^3COOP: el host est\xe1 en %s, cargando...\n", map);
-        CoopStatus("Anfitri\xf3n encontrado: cargando %s...", map);
+        g::Com_Printf("^3COOP: the host is on %s, loading...\n", map);
+        CoopStatus("Host found: loading %s...", map);
         char cmd[128];
         snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", map);
         g::Cbuf_AddText(cmd);
@@ -1939,7 +1939,7 @@ void JoinerControl(uint8_t type, Reader r)
         if (S->joined) JoinerApplyDObj(r);
         break;
     case M_BYE:
-        JoinerLeave("El anfitri\xf3n cerr\xf3 la partida cooperativa.");
+        JoinerLeave("The host closed the co-op game.");
         break;
     case M_ANIM:
         if (S->joined) JoinerApplyAnims(r);
@@ -1958,8 +1958,8 @@ void JoinerControl(uint8_t type, Reader r)
         S->role = NONE;  // hasta cooprejoin: no se manda nada mientras carga
         memset(S->downed, 0, sizeof S->downed);
         Log("joiner: el host carga %s (%s), lo cargo y vuelvo a entrar", S->hostMap, newMap ? "nivel nuevo" : "checkpoint");
-        if (newMap) g::Com_Printf("^3COOP: el host pasa a %s, cargando...\n", S->hostMap);
-        else g::Com_Printf("^3COOP: el host vuelve al \xfaltimo checkpoint, reconectando...\n");
+        if (newMap) g::Com_Printf("^3COOP: the host moved on to %s, loading...\n", S->hostMap);
+        else g::Com_Printf("^3COOP: the host went back to the last checkpoint, reconnecting...\n");
         char cmd[128];
         snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", S->hostMap);
         g::Cbuf_AddText(cmd);
@@ -2007,7 +2007,7 @@ void JoinerKeepAlive()
     if (!g_hostSeen) g_hostSeen = now;  // nucleo recien recargado
     if (now - g_hostSeen < HOST_TIMEOUT) return;
     Log("joiner: el host no responde hace %lu ms, vuelvo al menu", now - g_hostSeen);
-    JoinerLeave("Se perdi\xf3 la conexi\xf3n con el anfitri\xf3n.");
+    JoinerLeave("Lost connection to the host.");
 }
 
 // Vuelta al menu principal. Los DObj propios se olvidan (como en M_RELOAD): el servidor local corre hasta que
@@ -2065,7 +2065,7 @@ void SteamFrame()
         if (up) Log("steam: listo como '%s' (%I64u)", steam::Name(steam::MyId()), steam::MyId());
         else Log("steam: no disponible (%s), solo por IP", steam::error);
         if (!up) {
-            g::Cvar_Set("ui_coop_steam", "Steam cerrado: solo se puede unir por IP.");
+            g::Cvar_Set("ui_coop_steam", "Steam is closed: you can only join by IP.");
             HideFriendButtons(1);
         }
         wasUp = up;
@@ -2079,7 +2079,7 @@ void SteamFrame()
         snprintf(connect, sizeof connect, "+coopjoin steam:%I64u", steam::MyId());
         steam::SetPresence("codcoop", presence ? "host" : "");
         steam::SetPresence("connect", presence ? connect : "");
-        steam::SetPresence("status", presence ? "Anfitri\xc3\xb3n de CoD Coop" : "");
+        steam::SetPresence("status", presence ? "Hosting CoD Coop" : "");
     }
     static DWORD lastScan;
     if (GetTickCount() - lastScan < 2000) return;
@@ -2091,7 +2091,7 @@ void SteamFrame()
         if (found == 3) return;
         char name[64];
         steam::Latin1(steam::Name(id), name, sizeof name);
-        snprintf(now.text[found], sizeof now.text[found], "Unirse a %s", name);
+        snprintf(now.text[found], sizeof now.text[found], "Join %s", name);
         snprintf(now.id[found], sizeof now.id[found], "%I64u", id);
         ++found;
     });
@@ -2104,7 +2104,7 @@ void SteamFrame()
         snprintf(var, sizeof var, "coop_friendid%d", k + 1);
         g::Cvar_Set(var, now.id[k][0] ? now.id[k] : "0");
     }
-    g::Cvar_Set("ui_coop_steam", found ? "Amigos de Steam con partida creada:" : "Steam: ning\xfan amigo cre\xf3 una partida todav\xed" "a.");
+    g::Cvar_Set("ui_coop_steam", found ? "Steam friends hosting a game:" : "Steam: none of your friends is hosting yet.");
 }
 
 // ---------- comandos de consola ----------
@@ -2113,14 +2113,14 @@ void Cmd_CoopHost()
 {
     int port = g::cmd_argc > 1 ? atoi(g::Argv(1)) : 28960;
     if (!OpenSocket(port)) {
-        g::Com_Printf("^1COOP: no se pudo abrir el puerto UDP %d\n", port);
-        CoopStatus("No se pudo abrir el puerto UDP %d (otro programa lo usa?)", port);
+        g::Com_Printf("^1COOP: could not open UDP port %d\n", port);
+        CoopStatus("Could not open UDP port %d (is another program using it?)", port);
         return;
     }
     S->role = HOST;
-    g::Com_Printf("^2COOP: host listo en el puerto %d. Los demas: coopjoin <tu ip>\n", port);
-    CoopStatus("Anfitri\xf3n listo (puerto UDP %d). Ahora eleg\xed Nueva Partida o Cargar Partida; "
-               "los dem\xe1s se unen con tu IP%s.", port, steam::up ? " o desde Steam" : "");
+    g::Com_Printf("^2COOP: hosting on port %d. Others: coopjoin <your ip>\n", port);
+    CoopStatus("Hosting (UDP port %d). Now choose New Game or Load Game; others join with your IP%s.", port,
+               steam::up ? " or through Steam" : "");
 }
 
 // coopjoin <ip>[:puerto]; sin argumento usa la IP escrita en el menu Cooperativo (cvar coop_ip)
@@ -2128,8 +2128,8 @@ void Cmd_CoopJoin()
 {
     const char* target = g::cmd_argc > 1 ? g::Argv(1) : g::CvarString("coop_ip");
     if (!*target) {
-        g::Com_Printf("uso: coopjoin <ip>[:puerto]\n");
-        CoopStatus("Escrib\xed la IP del anfitri\xf3n.");
+        g::Com_Printf("usage: coopjoin <ip>[:port]\n");
+        CoopStatus("Type the hosts IP.");
         return;
     }
     char host[128];
@@ -2139,8 +2139,8 @@ void Cmd_CoopJoin()
     if (!_strnicmp(host, "steam:", 6)) {  // coopjoin steam:<SteamID> (boton del menu o "Unirse a la partida" de Steam)
         uint64_t id = _strtoui64(host + 6, nullptr, 10);
         if (!steam::up || !id) {
-            g::Com_Printf("^1COOP: %s\n", steam::up ? "uso: coopjoin steam:<SteamID>" : "Steam no esta abierto");
-            CoopStatus(steam::up ? "Ese amigo de Steam no es v\xe1lido." : "Steam no est\xe1 abierto.");
+            g::Com_Printf("^1COOP: %s\n", steam::up ? "usage: coopjoin steam:<SteamID>" : "Steam is not running");
+            CoopStatus(steam::up ? "That Steam friend is not valid." : "Steam is not running.");
             return;
         }
         S->host = steam::Addr(S->steamPeer, id);
@@ -2152,8 +2152,8 @@ void Cmd_CoopJoin()
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_DGRAM;
         if (getaddrinfo(host, nullptr, &hints, &res) != 0 || !res) {
-            g::Com_Printf("^1COOP: no se encontro '%s'\n", host);
-            CoopStatus("No se encontr\xf3 '%s'.", host);
+            g::Com_Printf("^1COOP: could not find '%s'\n", host);
+            CoopStatus("Could not find '%s'.", host);
             return;
         }
         S->host = *(sockaddr_in*)res->ai_addr;
@@ -2166,11 +2166,11 @@ void Cmd_CoopJoin()
     memset(S->cs, 0, sizeof S->cs);  // el gamestate se junta de los M_CS de este intento
     JoinerSendJoin();
     if (steam::IsAddr(S->host)) {
-        g::Com_Printf("COOP: uniendose a %s por Steam...\n", host);
-        CoopStatus("Buscando a %s por Steam... (tiene que haber elegido Crear partida y estar jugando)", host);
+        g::Com_Printf("COOP: joining %s via Steam...\n", host);
+        CoopStatus("Looking for %s via Steam... (they must have chosen Host game and be playing)", host);
     } else {
-        g::Com_Printf("COOP: uniendose a %s:%d...\n", host, ntohs(S->host.sin_port));
-        CoopStatus("Buscando al anfitri\xf3n en %s:%d... (tiene que haber elegido Crear partida y estar jugando)",
+        g::Com_Printf("COOP: joining %s:%d...\n", host, ntohs(S->host.sin_port));
+        CoopStatus("Looking for the host at %s:%d... (they must have chosen Host game and be playing)",
                    host, ntohs(S->host.sin_port));
     }
 }
@@ -2182,7 +2182,7 @@ void Cmd_CoopLeave()
     Writer w(M_BYE);
     if (S->role == JOINER) {
         for (int k = 0; k < 3; ++k) SendTo(S->host, w.buf, w.len);  // UDP: el host atiende el primero
-        JoinerLeave("Te desconectaste de la partida cooperativa.");
+        JoinerLeave("You left the co-op game.");
     } else if (S->role == HOST) {
         for (int n = 1; n < g::MAX_CLIENTS; ++n) {
             if (!S->remote[n].active) continue;
@@ -2193,9 +2193,9 @@ void Cmd_CoopLeave()
         S->role = NONE;
         g_noPause = false;
         SkipUiPauseCheck(false);  // el menu vuelve a pausar como en el SP
-        CoopStatus("Dejaste de ser anfitri\xf3n: la partida sigue solo para vos.");
+        CoopStatus("You stopped hosting: the game goes on just for you.");
     } else {
-        CoopStatus("No est\xe1s en una partida cooperativa.");
+        CoopStatus("You are not in a co-op game.");
     }
 }
 
@@ -2219,7 +2219,7 @@ void Cmd_CoopRejoin()
     S->hostMap[0] = 0;
     memset(S->cs, 0, sizeof S->cs);
     JoinerSendJoin();
-    g::Com_Printf("COOP: volviendo a entrar...\n");
+    g::Com_Printf("COOP: rejoining...\n");
 }
 
 // Pruebas sin teclado: lo que se escriba en codcoop.cmd (o codcoop_join.cmd) va a la consola.

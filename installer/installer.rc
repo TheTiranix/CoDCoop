@@ -2,5 +2,5 @@
 1 RCDATA "build/ddraw.dll"
 2 RCDATA "build/codcoop_core.dll"
 3 RCDATA "game/main/pakz_coop.pk3"
-4 RCDATA "instalador/LEEME.txt"
+4 RCDATA "installer/README.txt"
 5 RCDATA "build/steam_api.dll"
