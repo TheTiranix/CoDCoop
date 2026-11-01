@@ -1592,6 +1592,46 @@ void HookDamage(bool on)
     }
 }
 
+// Jugadores que se traspasan: en training (y otros mapas) todos aparecen en el mismo lugar y encimados nadie se
+// podia mover. ClientThink (gamex86 RVA 0x12600: mov ecx, trace) le da a Pmove el trace del juego (RVA 0x42b00);
+// lo cambiamos por este, que deja a los demas jugadores sin contents (gentity+0xc4, ver SV_LinkEntity 0x44db30)
+// mientras dura el trace. Las balas y la IA usan otros traces: siguen pegando y chocando con los jugadores.
+constexpr uint32_t PMOVE_TRACE_IMM = 0x12601, GAME_TRACE_RVA = 0x42b00;
+uint8_t* g_gameBase;
+void __cdecl PlayerMoveTrace(void* result, const float* start, const float* mins, const float* maxs, const float* end,
+                             int passEnt, int mask)
+{
+    int saved[g::MAX_CLIENTS];
+    for (int n = 0; n < g::MAX_CLIENTS; ++n) {
+        int& contents = *(int*)(g::Entity(n) + 0xc4);
+        saved[n] = contents;
+        if (n != passEnt) contents = 0;
+    }
+    ((void(__cdecl*)(void*, const float*, const float*, const float*, const float*, int, int))(g_gameBase + GAME_TRACE_RVA))(
+        result, start, mins, maxs, end, passEnt, mask);
+    for (int n = 0; n < g::MAX_CLIENTS; ++n) *(int*)(g::Entity(n) + 0xc4) = saved[n];
+}
+
+void HookPlayerTrace(bool on)
+{
+    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    if (!game || game[PMOVE_TRACE_IMM - 1] != 0xB9) return;  // mov ecx, imm32
+    uintptr_t orig = (uintptr_t)(game + GAME_TRACE_RVA), want = on ? (uintptr_t)PlayerMoveTrace : orig;
+    uintptr_t now = *(uintptr_t*)(game + PMOVE_TRACE_IMM);
+    if (now == want || (now != orig && now != (uintptr_t)PlayerMoveTrace)) return;  // ya esta, o no es el codigo esperado
+    g_gameBase = game;
+    hook::Write((uintptr_t)(game + PMOVE_TRACE_IMM), &want, 4);
+}
+
+// Prediccion de cada cliente (cgame): choca con las entidades que tengan s.solid (gentity+0x80, lo arma SV_LinkEntity
+// en cada link). En 0 para los jugadores despues del frame del servidor: el cgame del host lo lee de la memoria del
+// servidor y a los remotos les llega asi en M_ENTS y en sus snapshots.
+void PlayersNotSolidForPrediction()
+{
+    for (int n = 0; n < g::MAX_CLIENTS; ++n)
+        if (PlayerInGame(n)) *(int*)(g::Entity(n) + 0x80) = 0;
+}
+
 // Pausas (tarea 2.5). El SP se pausa con cl_paused 1: SV_Frame no avanza y el cliente no manda usercmds
 // (0x40b3e0). Lo pone la UI al abrir un menu y SV_Frame mismo si la UI esta en pantalla completa (0x44d0a3; el
 // JNZ de 0x44d0a6 saltea ese paso).
@@ -1621,14 +1661,30 @@ bool LevelExiting()
 
 // Host: con remotos conectados el menu no pausa (como en multijugador). La pantalla de inicio tras cargar y la de
 // fin de nivel si.
+bool g_noPause;  // HostNoPause activo: el menu del host no pausa
 void HostNoPause()
 {
-    bool on = CoopActive() && !PregameOpen() && !LevelExiting();
+    bool on = g_noPause = CoopActive() && !PregameOpen() && !LevelExiting();
     SkipUiPauseCheck(on);
     if (on && *(int*)(g::cl_paused + 0x20)) {
         g::Cvar_Set("cl_paused", "0");
         Log("host: menu abierto con remotos conectados, el juego sigue");
     }
+}
+
+// El menu principal muestra los botones de partida en curso (Volver a la partida, Guardar...) o los de afuera
+// (Continuar partida = cargar lo ultimo guardado) segun cl_paused. Como HostNoPause deja cl_paused en 0, el host
+// veia los de afuera. El menu de pakz_coop.pk3 (tools/make_ui.py) mira ui_coop_paused: cl_paused, o 1 si el host
+// tiene el menu abierto sin pausa (UI_IS_FULLSCREEN, vmMain 6 de la UI, como 0x4103e0).
+void UiPausedFrame()
+{
+    if (!g::cl_paused) return;
+    int args[13] = {6};
+    bool paused = *(int*)(g::cl_paused + 0x20) || (g_noPause && g::uivm && g::CallVM(g::uivm, args));
+    static int last = -1;
+    if (paused == last) return;  // Cvar_Set lo anuncia en la consola
+    g::Cvar_Set("ui_coop_paused", paused ? "1" : "0");
+    last = paused;
 }
 
 // Remoto: "Haz clic para iniciar" se saltea solo, haciendo lo mismo que el clic
@@ -1695,8 +1751,12 @@ void HostCheckRemotes()
 // liberan ahora, mientras su memoria sigue siendo valida. Los remotos cargan `map` y se vuelven a unir solos.
 void HostDropRemotes(const char* map)
 {
+    // cargar partida (loadgame_continue, Guardar/Cargar) llega aca con el servidor ya cerrado: la memoria de los
+    // cuerpos ya esta liberada y svs.clients en 0. Tocarlos rompia el juego (0x45b8f0, escritura en 0xb87c).
+    bool server = g::sv_state == 2 && g::svs_clients;
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
-        if (S->bodyTree[n]) HostFreeBody(n);
+        if (S->bodyTree[n] && server) HostFreeBody(n);
+        S->bodyTree[n] = nullptr;
         S->downed[n] = false;
     }
     for (int n = 1; n < g::MAX_CLIENTS; ++n) {
@@ -1704,7 +1764,7 @@ void HostDropRemotes(const char* map)
         Writer w(M_RELOAD);
         w.Put(map, (int)strlen(map) + 1);
         for (int k = 0; k < 3; ++k) SendTo(S->remote[n].addr, w.buf, w.len);  // UDP: el remoto atiende el primero
-        *(int*)(g::Client(n) + g::CL_STATE) = 0;
+        if (server) *(int*)(g::Client(n) + g::CL_STATE) = 0;
         S->remote[n].active = false;
     }
 }
@@ -2373,6 +2433,7 @@ EXPORT void Coop_Shutdown()
     HookDamage(false);
     HookSpawnServer(false);
     HookUsercmd(false);
+    HookPlayerTrace(false);
     SkipUiPauseCheck(false);
     Log("nucleo descargado");
     g_api = nullptr;
@@ -2409,6 +2470,7 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
     PollCmdFile();
     StatsTick();
     SteamFrame();
+    UiPausedFrame();
     if (S->sock == INVALID_SOCKET) return 0;
     FlushDelayed();
     if (S->role == HOST && sock == NS_SERVER) {  // corre aunque el juego este en pausa
@@ -2462,6 +2524,8 @@ EXPORT void __cdecl Coop_HostFrame()
     HookDamage(true);
     HookSpawnServer(true);
     HookUsercmd(true);
+    HookPlayerTrace(true);
+    PlayersNotSolidForPrediction();
     static int lastTime;
     int now = *(int*)0x152e930;  // sv.time
     float dt = (now - lastTime) / 1000.0f;

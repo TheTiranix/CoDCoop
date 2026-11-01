@@ -9,6 +9,10 @@ with zipfile.ZipFile(os.path.join(main_dir, 'localized_spanish_pak0.pk3')) as z:
     menu = z.read('ui/main.menu').decode('latin-1')
 read = lambda name: open(os.path.join(root, 'ui', name), encoding='utf-8').read()
 
+# los botones de partida en curso miran ui_coop_paused y no cl_paused: con remotos el host no pausa (ver
+# UiPausedFrame en src/core.cpp) y sin esto su menu mostraba "Continuar partida" en vez de "Volver a la partida"
+menu, changed = re.subn(r'(cvarTest\s+)"cl_paused"', r'\1"ui_coop_paused"', menu, flags=re.I)
+assert changed == 17, changed
 lines = menu.split('\n')
 # lugar para el boton: en el menu "main" (hasta el siguiente menuDef) la columna de abajo pasa de 35 a 30 px
 end = next(i for i, l in enumerate(lines) if i > 30 and re.match(r'\s*menuDef\b', l))

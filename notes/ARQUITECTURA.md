@@ -254,3 +254,22 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   cvars se escriben solo si cambia la lista (Cvar_Set lo anuncia en la consola).
 - Con una sola cuenta de Steam no se puede probar host + joiner en la misma PC: lo que un juego se manda a su propio
   SteamID le vuelve a el mismo, no al otro proceso.
+
+## Jugadores que se traspasan
+- ClientThink (gamex86 RVA 0x12600, `mov ecx, imm32`) le pasa a Pmove el trace del juego (RVA 0x42b00, 7 args:
+  resultado, inicio, mins, maxs, fin, entidad a saltear, mascara). HookPlayerTrace cambia ese imm32 por
+  PlayerMoveTrace, que pone en 0 los contents (gentity+0xc4) de los demas jugadores durante el trace.
+- SV_LinkEntity (0x44db30, EDI = gentity): s.solid +0x80, r.bmodel +0xa8, mins +0xac, maxs +0xb8, contents +0xc4.
+- Prediccion del cgame: CG_BuildSolidList (cgame 0x3001e8d0) toma las entidades con nextState.solid != 0
+  (centity+0x11c); CG_Trace 0x3001ec30 (mundo, trap 0x29) + CG_ClipMoveToEntities 0x3001e960. cg_pmove en
+  0x30076818 (traces +0x110..+0x118). PlayersNotSolidForPrediction pone s.solid = 0 en los jugadores despues del
+  frame del servidor.
+- Prueba: training deja a los 2 en el mismo lugar; tools\walk.ps1 host|join <s> <tecla> mantiene una tecla.
+
+## Menu de pausa del host y cargar partida
+- main.menu elige botones con cvarTest "cl_paused" (17 veces): showCvar 1 = en partida (Volver a la partida,
+  Reiniciar, Guardar/Cargar), 0 = afuera (Continuar partida = loadgame_continue). HostNoPause deja cl_paused en 0,
+  asi que make_ui.py los cambia a ui_coop_paused, que UiPausedFrame pone en cl_paused o en 1 si el host tiene el
+  menu abierto sin pausa (UI vmMain 6 = UI_IS_FULLSCREEN, como 0x4103e0).
+- Cargar partida con remotos llega a HostCheckReload (g_reloading 1) con el servidor ya cerrado (svs.clients en 0,
+  memoria de los cuerpos liberada): HostDropRemotes no toca nada del motor si sv_state != 2.
