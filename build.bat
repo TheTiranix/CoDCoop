@@ -13,6 +13,8 @@ rem CoD2 (en prueba): modulo aparte que carga ddraw.dll en CoD2SP_s.exe; copia d
 g++ %OPT% -o build\cod2coop.dll src\cod2.cpp -lws2_32
 if errorlevel 1 exit /b 1
 if exist game2\CoD2SP_s.exe copy /y build\cod2coop.dll game2\ >nul && copy /y build\ddraw.dll game2\ >nul
+rem CoD2: boton "Co-op" del menu principal (game2\main\zz_coop2.iwd, sale de iw_06.iwd del juego)
+if exist game2\main\iw_06.iwd python -I tools\make_ui2.py >nul 2>nul || echo AVISO: no se pudo armar zz_coop2.iwd (juego abierto?)
 copy /y build\codcoop_core.dll game\codcoop_core.dll >nul
 if errorlevel 1 (echo NO SE PUDO COPIAR el nucleo & exit /b 1)
 fc /b build\ddraw.dll game\ddraw.dll >nul 2>nul || copy /y build\ddraw.dll game\ddraw.dll >nul 2>nul || echo AVISO: ddraw.dll en uso, los juegos abiertos siguen con el cargador viejo

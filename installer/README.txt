@@ -18,11 +18,12 @@ Install
 
 Call of Duty 2 (experimental)
 - Version 1.3 (CoD2SP_s.exe), with co-op installed on every PC.
-- The host starts a mission and types coop2host in the console. The others type
-  coop2join followed by the host's IP (UDP port 28962), even from the main menu: their
-  game loads the host's mission by itself.
+- Main menu -> "Co-op". The host clicks "Host game" and then starts or loads a mission
+  as usual. The others type the host's IP and click "Join" (UDP port 28962): their game
+  loads the host's mission by itself. In the console, coop2host and coop2join <IP> do
+  the same.
 - Teammates see each other, shoot, ride the host's vehicles and revive each other (get
-  close and hold Use for 3 seconds). There is no Co-op menu yet.
+  close and hold Use for 3 seconds).
 
 Play
 1. Start Call of Duty as usual and open "Co-op" (main menu).
@@ -51,5 +52,5 @@ Uninstall
 - Delete from the game folder: ddraw.dll, codcoop_core.dll, steam_api.dll,
   main\pakz_coop.pk3, uo\pakz_coop.pk3 and the codcoop_tmp folder. If there are .bak files
   (ddraw.dll.bak or steam_api.dll.bak), remove the .bak from their names.
-- Call of Duty 2: delete ddraw.dll and cod2coop.dll from the game folder (and rename
-  ddraw.dll.bak back to ddraw.dll if there is one).
+- Call of Duty 2: delete ddraw.dll, cod2coop.dll and main\zz_coop2.iwd from the game
+  folder (and rename ddraw.dll.bak back to ddraw.dll if there is one).

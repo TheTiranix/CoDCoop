@@ -1,0 +1,157 @@
+	// --- coop: ventana del boton "Co-op" de CoD2 (la agrega tools/make_ui2.py al final de ui/main.menu) ---
+	menuDef
+	{
+		name "coop_popmenu"
+		visible 0
+		fullscreen 0
+		rect 184 110 275 230
+		focusColor GLOBAL_FOCUSED_COLOR
+		style 1
+		border 1
+		popup
+		onESC { close coop_popmenu; open main }
+
+		itemDef
+		{
+			name backimage2fade
+			style WINDOW_STYLE_SHADER
+			rect -312 -112 896 484
+			background "white"
+			forecolor 0 0 0 0.3
+			backcolor 0 0 0 0.3
+			visible 1
+			decoration
+		}
+		itemDef
+		{
+			name backimage2fade
+			style WINDOW_STYLE_SHADER
+			rect -130 2 535 245
+			background "popmenu_bg"
+			visible 1
+			decoration
+		}
+		itemDef
+		{
+			name backimage2fade
+			style WINDOW_STYLE_SHADER
+			rect -30 20 335 24
+			background "popmenu_goldline"
+			visible 1
+			decoration
+		}
+		itemDef
+		{
+			name title
+			text "Co-op - up to 4 players"
+			style 0
+			textscale HEADER_SIZE
+			textstyle ITEM_TEXTSTYLE_SHADOWED
+			rect 137 25 110 20
+			textalign 1
+			textalignx -7
+			textaligny 5
+			decoration
+			forecolor POPMENU_HEADER_COLOR
+			visible 1
+		}
+
+		// crear: abre el puerto; despues se elige Nueva partida, Seleccion de mision o Continuar como siempre
+		itemDef
+		{
+			name		host
+			text		"Host game"
+			type		1
+			textscale	.4
+			style		UI_BUTTON_STYLE
+			textfont	UI_FONT_NORMAL
+			textstyle	ITEM_TEXTSTYLE_SHADOWED
+			rect		60 45 155 26
+			textalign	1
+			textalignx	77
+			textaligny	20
+			forecolor	UI_BUTTON_TEXT_COLOR
+			visible		1
+			action { play "mouse_click"; exec "coop2host"; }
+			mouseEnter { play "mouse_over"; }
+		}
+
+		// unirse: IP del anfitrion (dvar coop2_ip; coop2join sin argumento la usa)
+		itemDef
+		{
+			name		ip
+			type		ITEM_TYPE_EDITFIELD
+			text		"Host IP: "
+			dvar		"coop2_ip"
+			maxchars	40
+			maxPaintChars	20
+			rect		30 92 215 20
+			style		1
+			border		1
+			bordercolor	.5 .5 .5 .5
+			textalign	ITEM_ALIGN_LEFT
+			textalignx	6
+			textaligny	15
+			textscale	.25
+			backcolor	0 0 0 .4
+			forecolor	.9 .9 .9 1
+			visible		1
+			action { play "mouse_click"; }
+			mouseEnter { play "mouse_over"; }
+		}
+		itemDef
+		{
+			name		join
+			text		"Join"
+			type		1
+			textscale	.4
+			style		UI_BUTTON_STYLE
+			textfont	UI_FONT_NORMAL
+			textstyle	ITEM_TEXTSTYLE_SHADOWED
+			rect		60 118 155 26
+			textalign	1
+			textalignx	77
+			textaligny	20
+			forecolor	UI_BUTTON_TEXT_COLOR
+			visible		1
+			action { play "mouse_click"; exec "coop2join"; }
+			mouseEnter { play "mouse_over"; }
+		}
+		itemDef
+		{
+			name		back
+			text		"@MENU_BACK"
+			type		1
+			textscale	.35
+			style		UI_BUTTON_STYLE
+			textfont	UI_FONT_NORMAL
+			textstyle	ITEM_TEXTSTYLE_SHADOWED
+			rect		60 150 155 22
+			textalign	1
+			textalignx	77
+			textaligny	17
+			forecolor	UI_BUTTON_TEXT_COLOR
+			visible		1
+			action { play "mouse_click"; close coop_popmenu; open main; }
+			mouseEnter { play "mouse_over"; }
+		}
+
+		// estado (lo escribe el mod en ui_coop2_status)
+		itemDef
+		{
+			name		status
+			rect		15 180 245 45
+			type		ITEM_TYPE_TEXT
+			style		0
+			textstyle	ITEM_TEXTSTYLE_SHADOWED
+			autowrapped
+			dvar		"ui_coop2_status"
+			textalign	ITEM_ALIGN_CENTER
+			textalignx	122
+			textaligny	12
+			textscale	.22
+			forecolor	1 1 .6 1
+			visible		1
+			decoration
+		}
+	}

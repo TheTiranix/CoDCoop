@@ -1,0 +1,26 @@
+		// --- coop: boton del menu principal de CoD2 (lo inserta tools/make_ui2.py antes de "Multijugador") ---
+		itemDef
+		{
+			name		coop
+			text		"Co-op"
+			type		ITEM_TYPE_BUTTON
+			style		WINDOW_STYLE_EMPTY
+			textstyle	TEXT_ON_BG_STYLE
+			rect		MAIN_RECT_X 300 MAIN_RECT_WIDTH MAIN_RECT_HEIGHT MAIN_RECT_HORZALIGN MAIN_RECT_VERTALIGN
+			textalign	MAIN_TEXTALIGN
+			textscale	MAIN_TEXTSCALE
+			textalignx	MAIN_TEXTALIGN_X
+			textaligny	MAIN_TEXTALIGN_Y
+			forecolor	MAIN_FORECOLOR
+			visible		1
+			textfont	UI_FONT_NORMAL
+			mouseEnter
+			{
+				play "mouse_over";
+			}
+			action
+			{
+				play "mouse_click";
+				open coop_popmenu;
+			}
+		}

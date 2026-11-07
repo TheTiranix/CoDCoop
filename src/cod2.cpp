@@ -59,6 +59,21 @@ void Cbuf_AddText(const char* text)
     asm volatile("call *%1" : "+a"(text) : "r"((uintptr_t)0x41afc0) : "ecx", "edx", "memory");
 }
 
+// linea de estado de la ventana Co-op (ui/cod2_coop_popmenu.menu); tambien va a la consola
+void Status(const char* fmt, ...)
+{
+    char text[200], cmd[256];
+    va_list a;
+    va_start(a, fmt);
+    vsnprintf(text, sizeof text, fmt, a);
+    va_end(a);
+    for (char* c = text; *c; ++c)
+        if (*c == '"' || *c == ';' || *c == '\n') *c = ' ';
+    snprintf(cmd, sizeof cmd, "set ui_coop2_status \"%s\"\n", text);
+    Cbuf_AddText(cmd);
+    Com_Printf("^2COOP: %s\n", text);
+}
+
 struct Msg {  // msg_t
     int overflowed;
     uint8_t* data;
@@ -873,7 +888,7 @@ void HostJoin(const sockaddr_in& from, const uint8_t* body, int len)
         if (restored) {
             Log("host: %s:%d retoma al jugador %d de la partida cargada en %.0f %.0f %.0f", inet_ntoa(from.sin_addr),
                 ntohs(from.sin_port), n + 1, o[0], o[1], o[2]);
-            Com_Printf("^2COOP: player %d is back\n", n + 1);
+            Status("Player %d is back.", n + 1);
             Packet p(M_ACCEPT);
             p.Put<int>(n);
             p.Send(from);
@@ -899,7 +914,7 @@ void HostJoin(const sockaddr_in& from, const uint8_t* body, int len)
         g_downed[n] = false;
         Log("host: %s:%d entra como jugador %d en %.0f %.0f %.0f", inet_ntoa(from.sin_addr), ntohs(from.sin_port), n + 1,
             o[0], o[1], o[2]);
-        Com_Printf("^2COOP: a player joined (player %d)\n", n + 1);
+        Status("Player %d joined.", n + 1);
     }
     Packet p(M_ACCEPT);
     p.Put<int>(n);
@@ -1213,7 +1228,7 @@ void Poll()
                 g_joined = true;
                 g_slot = *(const int*)body;
                 Log("joiner: el host me acepto como jugador %d", g_slot + 1);
-                Com_Printf("^2COOP: connected to the host (player %d)\n", g_slot + 1);
+                Status("Connected to the host as player %d.", g_slot + 1);
             } else if (type == M_REJOIN && !g_mapLoadSince && bodyLen > 1 && !buf[len - 1] &&
                        (g_joined || _stricmp((const char*)body, MapName()))) {
                 // El host cargo un punto de control o paso a otro nivel (su hora vuelve atras o empieza de nuevo y el
@@ -1225,10 +1240,10 @@ void Poll()
                 char cmd[96];
                 snprintf(cmd, sizeof cmd, "map %.63s\n", (const char*)body);
                 Log("joiner: el host cargo otra partida (%s), cargo el mapa y vuelvo a entrar", (const char*)body);
-                Com_Printf("^2COOP: the host loaded %s, loading it too\n", (const char*)body);
+                Status("Loading the host's mission (%s)...", (const char*)body);
                 Cbuf_AddText(cmd);
             } else if (type == M_FULL) {
-                Com_Printf("^1COOP: the game is full\n");
+                Status("The game is full (4 players).");
                 g_role = NONE;
             } else if (type == M_SNAP && g_joined) {
                 JoinerSnapshot(body, bodyLen);
@@ -1278,23 +1293,41 @@ void Cmd_Host()
     }
     g_role = HOST;
     Log("host: esperando jugadores en el puerto %d", PORT);
-    Com_Printf("^2COOP: hosting on UDP port %d\n", PORT);
+    Status("Hosting on UDP port %d. Start or load a mission; the others join with your IP.", PORT);
 }
 
 void Cmd_Join()
 {
-    // coop2join <IP> (cmd_argc 0x6c0280, cmd_argv 0x6bb680, como los lee writeconfig 0x42ea40)
-    char ip[64] = "127.0.0.1";
-    if (*(int*)0x6c0280 >= 2) sscanf(((const char**)0x6bb680)[1], "%63[0-9.]", ip);
+    // coop2join <IP o nombre> (cmd_argc 0x6c0280, cmd_argv 0x6bb680, como los lee writeconfig 0x42ea40); sin
+    // argumento, la del campo de la ventana Co-op (dvar coop2_ip)
+    char ip[64] = "";
+    if (*(int*)0x6c0280 >= 2) {
+        sscanf(((const char**)0x6bb680)[1], "%63s", ip);
+    } else if (uint8_t* d = Dvar_FindVar("coop2_ip")) {
+        const char* v = *(const char**)(d + 8);
+        if (v) sscanf(v, "%63s", ip);
+    }
+    if (!ip[0]) {
+        Status("Type the host's IP first.");
+        return;
+    }
     if (!OpenSocket(0)) return;
     g_host = {};
     g_host.sin_family = AF_INET;
     g_host.sin_port = htons(PORT);
     g_host.sin_addr.s_addr = inet_addr(ip);
+    if (g_host.sin_addr.s_addr == INADDR_NONE) {
+        hostent* h = gethostbyname(ip);
+        if (!h) {
+            Status("Could not find %s.", ip);
+            return;
+        }
+        memcpy(&g_host.sin_addr, h->h_addr_list[0], 4);
+    }
     g_role = JOINER;
     g_joined = false;
     Log("joiner: uniendome a %s:%d", ip, PORT);
-    Com_Printf("^2COOP: joining %s...\n", ip);
+    Status("Joining %s...", ip);
     JoinerSendJoin();
 }
 }  // namespace
@@ -1424,6 +1457,7 @@ void RegisterCommands()
     Cmd_AddCommand("coop2join", Cmd_Join);
     Cmd_AddCommand("coop2hurt", Cmd_Hurt);
     Cmd_AddCommand("coop2save", Cmd_Save);
+    if (!Dvar_FindVar("coop2_ip")) Cbuf_AddText("seta coop2_ip \"\"\n");
 }
 
 // Com_Frame (0x42ed20), en cada frame del juego: sin nivel corriendo (menu, carga) Cod2_Snapshot no se llama; el que
@@ -1431,7 +1465,9 @@ void RegisterCommands()
 extern "C" void __cdecl Cod2_ComFrame()
 {
     RegisterCommands();  // coop2join tambien desde el menu principal
-    if (g_role != JOINER || GetTickCount() - g_lastLevelFrame < 500) return;
+    if (GetTickCount() - g_lastLevelFrame < 500) return;  // en un nivel atiende Cod2_Snapshot
+    PollCommandFile();
+    if (g_role != JOINER) return;
     Poll();
     if (g_mapLoadSince && GetTickCount() - g_mapLoadSince > 120000) g_mapLoadSince = 0;
     if (!g_joined && !g_mapLoadSince && GetTickCount() - g_lastJoinTry > 1000) JoinerSendJoin();

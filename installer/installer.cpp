@@ -19,7 +19,8 @@ static const File COD1_FILES[] = {
     {5, L"steam_api.dll"},
 };
 static const File UO_FILES[] = {{6, L"uo\\pakz_coop.pk3"}};
-static const File COD2_FILES[] = {{1, L"ddraw.dll"}, {7, L"cod2coop.dll"}, {4, L"CoD Coop README.txt"}};
+static const File COD2_FILES[] = {{1, L"ddraw.dll"}, {7, L"cod2coop.dll"}, {8, L"main\\zz_coop2.iwd"},
+                                  {4, L"CoD Coop README.txt"}};
 
 enum { COD1 = 1, UO = 2, COD2 = 4 };
 
@@ -126,7 +127,7 @@ static Result Install(const std::wstring& dir, int games, const std::vector<std:
     if (games & COD1) files.insert(files.end(), std::begin(COD1_FILES), std::end(COD1_FILES));
     if (games & UO) files.insert(files.end(), std::begin(UO_FILES), std::end(UO_FILES));
     if (games & COD2) files.insert(files.end(), std::begin(COD2_FILES), std::end(COD2_FILES));
-    if (games & COD1) CreateDirectoryW((dir + L"\\main").c_str(), nullptr);
+    if (games & (COD1 | COD2)) CreateDirectoryW((dir + L"\\main").c_str(), nullptr);
     if (games & UO) CreateDirectoryW((dir + L"\\uo").c_str(), nullptr);
     for (const File& f : files) {
         if (WriteResource(f.id, dir + L"\\" + f.dest)) continue;
@@ -209,7 +210,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         done += std::wstring(L"\nCall of Duty: start it as usual, the main menu has a \"Co-op\" button.") +
                 (all & UO ? L" United Offensive has it too." : L"");
     if (all & COD2)
-        done += L"\nCall of Duty 2: the host types coop2host in the console, the others coop2join <host IP>.";
+        done += L"\nCall of Duty 2: start it as usual, the main menu has a \"Co-op\" button.";
     Msg(MB_ICONINFORMATION, done + L"\n\nInstructions are in \"CoD Coop README.txt\", in the game folder.");
     return 0;
 }
