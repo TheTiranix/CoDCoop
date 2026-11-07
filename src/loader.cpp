@@ -344,6 +344,13 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID)
             g_log = _fsopen(p, "w", _SH_DENYWR);
         }
         Log("codcoop cargado en %s, exe base %p", GetCommandLineA(), GetModuleHandleA(nullptr));
+        char exe[MAX_PATH];
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        if (!_stricmp(strrchr(exe, '\\') + 1, "CoD2SP_s.exe")) {  // CoD2: modulo aparte (src/cod2.cpp), en prueba
+            snprintf(p, sizeof p, "%scod2coop.dll", g_dir);
+            Log("CoD2: %s %s", p, LoadLibraryA(p) ? "cargado" : "no se pudo cargar");
+            return TRUE;
+        }
         LoadLibraryA("ws2_32.dll");  // que winsock quede cargado aunque se descargue el nucleo
         InstallHooks();
         SetUnhandledExceptionFilter(CrashLog);
