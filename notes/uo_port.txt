@@ -132,3 +132,14 @@ gamex86 0x12600 ClientThink          -> 0x140d0 (imm del trace en 0x140d1)
 gamex86 0x14900 ClientSpawn          -> 0x164d0
 gamex86 0xb000 dar arma              -> ? (llamada desde giveweapon 0x15020 -> 0x16c10)
 cgamex86 0x1e8d0 CG_BuildSolidList   -> 0x25ff0
+
+## encontrado probando (caido, cambio de mision, fallida)
+- CS_MODELS es 32 en UO (31 en CoD1): con 31 el cuerpo usaba el modelo de dibujo de al lado (texturas raras y
+  "R_GetShaderByHandle: out of range" en 0x50c0e4, skin por LOD del modelo equivocado).
+- getent("player", "classname") con varios jugadores cortaba scripts (animscripts GetPlayer, _atmosphere):
+  uo_gamex86 RVA 0x45aef "push msg; call Scr_Error" -> "jmp +0x0e" (queda el primero, el host).
+- XAnimCreateTree (0x4331f0) pide la memoria sin tipo (CoD1: tipo 5, que se suelta al cambiar de nivel): al
+  recargar, el que se une agotaba la memoria de scripts (MT_AllocIndex). Se liberan a mano: infos al recibir
+  M_RELOAD, el bloque (MT_FreeIndex 0x45fd30, ECX indice, EAX bytes) cuando ya cargo el mapa nuevo.
+- Mision fallida: el checkpoint guardado con un remoto da "G_LoadGame: client mis-match in savegame" (igual que
+  en CoD1, pendiente).

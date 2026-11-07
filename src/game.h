@@ -196,6 +196,14 @@ inline uint8_t* XAnimCreateTree(uint8_t* xanim)  // EBX = XAnim*
     asm volatile("call *%2" : "=a"(r), "+b"(xanim) : "r"((void*)A(0x431400, 0x4331f0)) : "ecx", "edx", "memory");
     return r;
 }
+// Bloque de memoria de un arbol (lo que libera XAnimFreeTree): indice y bytes. UO lo pide sin tipo (CoD1 con tipo 5,
+// que el motor suelta al cambiar de nivel), asi que en UO hay que liberarlo a mano.
+constexpr uintptr_t UO_TREE_BASE = 0x8f7400;
+inline int TreeBytes(const uint8_t* xanim) { int n = *(const int*)(xanim + 4); return n * 2 + 0xc + (n * 3 + 1) * 2; }
+inline void UO_FreeTreeBlock(int index, int bytes)  // MT_FreeIndex: ECX = indice, EAX = bytes
+{
+    asm volatile("call *%2" : "+c"(index), "+a"(bytes) : "r"((void*)0x45fd30) : "edx", "memory");
+}
 inline void XAnimFreeTree(uint8_t* tree)  // ECX = arbol
 {
     asm volatile("call *%1" : "+c"(tree) : "r"((void*)A(0x431440, 0x433230)) : "eax", "edx", "memory");

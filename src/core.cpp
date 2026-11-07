@@ -718,6 +718,28 @@ bool XAnimLoaded(const uint8_t* xanim)
     return false;
 }
 
+// UO: al recargar el mapa los arboles propios no se liberan con el DObj (el servidor local corre un frame mas y
+// los usa), pero tampoco los suelta el motor. Se sueltan sus infos ya, y el bloque con el mapa nuevo cargado
+// (JoinerHijack); el tamano se toma ahora, porque despues el XAnim del arbol ya no existe.
+struct OldTree { int index, bytes; };
+OldTree g_oldTrees[g::MAX_GENTITIES];
+int g_oldTreeCount;
+void KeepOldTrees()
+{
+    for (int e = 0; e < g::MAX_GENTITIES; ++e) {
+        uint8_t* tree = S->ownTree[e];
+        if (!tree || !XAnimLoaded(*(uint8_t**)tree) || g_oldTreeCount >= g::MAX_GENTITIES) continue;
+        FreeTreeInfos(tree);
+        g_oldTrees[g_oldTreeCount++] = {(int)(((uintptr_t)tree - g::UO_TREE_BASE) >> 3), g::TreeBytes(*(uint8_t**)tree)};
+    }
+}
+void FreeOldTrees()
+{
+    if (g_oldTreeCount) Log("joiner: libero %d arboles del mapa anterior", g_oldTreeCount);
+    for (int i = 0; i < g_oldTreeCount; ++i) g::UO_FreeTreeBlock(g_oldTrees[i].index, g_oldTrees[i].bytes);
+    g_oldTreeCount = 0;
+}
+
 void JoinerFreeDObj(int e)
 {
     uint8_t* tree = S->ownTree[e];
@@ -834,7 +856,7 @@ void JoinerApplyAnims(Reader r)
 // Indice de modelo (configstrings CS_MODELS 31..286, "xmodel/<nombre>") que el cliente usa para encontrar el
 // modelo de dibujo de cada parte de un DObj (DObj+0x38 = -indice); 0 si el nivel no lo cargo. Solo sirven los
 // que el nivel cargo: a mitad de partida XModelPrecache corta el juego con "model '%s' not precached".
-constexpr int CS_MODELS = 31, MAX_MODELS = 256;
+const int CS_MODELS = (int)g::A(31, 32), MAX_MODELS = 256;  // UO: un configstring mas antes de los modelos
 int ModelIndex(const char* name)
 {
     char full[128];
@@ -1621,6 +1643,17 @@ void HookDamage(bool on)
 {
     uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
     if (on && game && game != g_damageHooked) {
+        // UO: scripts como animscripts GetPlayer() hacen getent("player", "classname"); con varios jugadores el
+        // juego corta el script con "getent used with more than one entity". Se salta el error y queda el primero
+        // (el host): "push msg; call Scr_Error" -> "jmp" al siguiente.
+        if (g::uo) {
+            uint8_t* err = game + 0x45aef;
+            if (err[-2] == 0x74 && err[-1] == 0x0e && err[0] == 0x68 && err[5] == 0xFF && err[6] == 0x15) {
+                const uint8_t jmp[2] = {0xEB, 0x0E};
+                hook::Write((uintptr_t)err, jmp, 2);
+                Log("getent: con varios jugadores devuelve el primero");
+            }
+        }
         uint8_t* fn = game + G_DAMAGE_RVA;
         if (memcmp(fn, kGDamagePrologue, sizeof kGDamagePrologue) != 0) {
             Log("G_Damage: prologo inesperado, sin opcion de dano entre jugadores");
@@ -1879,6 +1912,7 @@ void JoinerHijack()
         g::Cbuf_AddText(cmd);
         return;
     }
+    FreeOldTrees();
     S->frozen = true;                              // el servidor local queda solo para colision y assets
     *(int*)(g::Client(0) + g::CL_STATE) = 0;      // que no acumule comandos que nadie confirma
     for (int i = 0; i < g::MAX_CONFIGSTRINGS; ++i)
@@ -1972,6 +2006,7 @@ void JoinerControl(uint8_t type, Reader r)
         const char* map = MapName(r);
         bool newMap = *map && _stricmp(map, S->hostMap) != 0;
         if (*map) snprintf(S->hostMap, sizeof S->hostMap, "%s", map);
+        if (g::uo) KeepOldTrees();
         memset(S->ownTree, 0, sizeof S->ownTree);
         S->joined = S->frozen = false;
         S->role = NONE;  // hasta cooprejoin: no se manda nada mientras carga
