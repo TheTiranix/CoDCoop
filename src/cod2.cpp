@@ -468,10 +468,28 @@ int AnimIndex(uint8_t* xanim, const char* name)
 
 const char* ModelName(void* model) { return model ? *(const char**)((uint8_t*)model + 0x88) : ""; }
 
-// Partes de un soldado aliado del nivel (de algun DObj con el XAnim de los humanos): cuerpo, cabeza, casco/gorra.
-int FindBodyModels(void** out)
+// Arma enganchada a una entidad (ent+0x1d4 indices de modelo, ent+0x1dc el tag de cada uno como string del juego,
+// como los arma G_DObjUpdate 0x4d6110): el primer modelo "weapon_*" y su tag.
+constexpr uintptr_t SL_STRINGS = 0x8aed00;  // base de los strings del script; el string i esta en base + 4 + i * 8
+bool EntityWeapon(int e, void** model, const char** tag)
 {
-    for (int pass = 0; pass < 2; ++pass)
+    uint8_t* ent = Entity(e);
+    for (int j = 0; j < 7; ++j) {
+        int m = ent[0x1d4 + j], t = *(uint16_t*)(ent + 0x1dc + j * 2);
+        void* xm = m ? ((void**)G_MODELS)[m] : nullptr;
+        if (!xm || !t || _strnicmp(ModelName(xm), "weapon_", 7)) continue;
+        *model = xm;
+        *tag = (const char*)(*(uintptr_t*)SL_STRINGS + 4 + t * 8);
+        return true;
+    }
+    return false;
+}
+
+// Partes de un soldado aliado del nivel (de algun DObj con el XAnim de los humanos): cuerpo, cabeza, casco/gorra y
+// su arma. Primero uno con arma (los personajes con nombre no la tienen en el DObj).
+int FindBodyModels(void** out, void** weapon, const char** tag)
+{
+    for (int pass = 0; pass < 3; ++pass)
         for (int e = MAX_CLIENTS; e < MAX_ENTS; ++e) {
             uint8_t* d = ClientDObj(e);
             uint8_t* tree = d ? *(uint8_t**)d : nullptr;
@@ -479,7 +497,9 @@ int FindBodyModels(void** out)
             const char* body = ModelName(*(void**)(d + 0x1c));
             if (_strnicmp(body, "character_", 10)) continue;
             bool allied = strstr(body, "russian") || strstr(body, "british") || strstr(body, "american") || strstr(body, "us_");
-            if (pass == 0 && !allied) continue;
+            bool armed = EntityWeapon(e, weapon, tag);
+            if ((pass == 0 && !(allied && armed)) || (pass == 1 && !allied)) continue;
+            if (!armed) *weapon = nullptr;
             int count = 0;
             for (int k = 0; k < d[0x18] && count < 3; ++k) {
                 void* m = *(void**)(d + 0x1c + k * 4);
@@ -495,18 +515,22 @@ int FindBodyModels(void** out)
 void CreateBody(int n)
 {
     void* parts[3];
-    int count = FindBodyModels(parts);
+    void* weapon = nullptr;
+    const char* tag = nullptr;
+    int count = FindBodyModels(parts, &weapon, &tag);
     if (count < 2 || !g_humanXAnim) return;
-    struct { void* model; const char* tag; int noCollide; } models[3];
-    for (int k = 0; k < count; ++k) models[k] = {parts[k], nullptr, 1};
+    struct { void* model; const char* tag; int noCollide; } models[4];
+    int nm = 0;
+    for (int k = 0; k < count; ++k) models[nm++] = {parts[k], nullptr, 1};
+    if (weapon) models[nm++] = {weapon, tag, 1};
     if (ClientDObj(n)) FreeClientDObj(n);
     uint8_t* tree = CreateTree(g_humanXAnim);
-    CreateClientDObj(n, models, count, tree);
+    CreateClientDObj(n, models, nm, tree);
     g_bodyTree[n] = tree;
     g_bodyAnim[n] = -1;
     for (int a = 0; a < BA_COUNT; ++a) g_animIndex[a] = AnimIndex(g_humanXAnim, kBodyAnimName[a]);
-    Log("cuerpo %d: %s + %s%s%s", n + 1, ModelName(parts[0]), ModelName(parts[1]), count > 2 ? " + " : "",
-        count > 2 ? ModelName(parts[2]) : "");
+    Log("cuerpo %d: %s + %s%s%s, arma %s (%s)", n + 1, ModelName(parts[0]), ModelName(parts[1]), count > 2 ? " + " : "",
+        count > 2 ? ModelName(parts[2]) : "", weapon ? ModelName(weapon) : "-", tag ? tag : "-");
 }
 
 int ChooseBodyAnim(int n)
@@ -583,8 +607,9 @@ void HostBodies(float dt)
     }
 }
 
-// mientras se arman los snapshots, los jugadores con cuerpo se mandan como entidades generales (el cliente, 0x4acf30,
-// no dibuja jugadores y dibuja las generales con su DObj de la tabla del cliente 0x77f480) y sin cabeceo
+// desde los snapshots hasta que el cliente local copia los estados (0x4a4330), los jugadores con cuerpo son entidades
+// generales (el cliente, 0x4acf30, no dibuja jugadores y dibuja las generales con su DObj de la tabla del cliente
+// 0x77f480) y sin cabeceo
 constexpr uint8_t ET_BODY = 0;  // 9 (como soldado) no: el juego lo trata como IA y se cae (0x4e804a)
 struct SavedPlayer { uint8_t eType; float pitch, roll; } g_savedPlayer[MAX_CLIENTS];
 void PlayersAsBodies(bool on)
