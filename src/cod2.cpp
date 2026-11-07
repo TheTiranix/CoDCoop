@@ -630,6 +630,16 @@ void PlayersAsBodies(bool on)
 }
 
 // ---------- host ----------
+// El script del nivel arma solo al jugador 1 (level.player): el remoto entra con el mismo equipo que el host.
+// playerState: +0xac granada (offHandIndex), +0xb0 arma, +0xc0 modelo de la vista, +0xf8 municion de reserva[128],
+// +0x2f8 cargador[128], +0x4f8..+0x537 bits de armas que tiene
+void CopyLoadout(int n)
+{
+    uint8_t *from = GClient(0), *to = GClient(n);
+    struct { int at, len; } parts[] = {{0xac, 8}, {0xc0, 4}, {0xf8, 0x538 - 0xf8}};
+    for (auto& r : parts) memcpy(to + r.at, from + r.at, r.len);
+}
+
 void HostJoin(const sockaddr_in& from)
 {
     int n = 0;
@@ -657,6 +667,7 @@ void HostJoin(const sockaddr_in& from)
         if (skip) hook::Write(PATH_INIT_CALL, saved, 5);
         ClientBegin(n);
         *(int*)(GClient(n) + PS_CLIENTNUM) = n;  // el SP lo deja en 0: el cliente remoto se tomaria por el host
+        CopyLoadout(n);
         // aparece donde esta el host (el punto de inicio del mapa puede quedar lejos o fuera de la zona de juego)
         float* o = (float*)(GClient(n) + 0x14);
         memcpy(o, GClient(0) + 0x14, 12);
