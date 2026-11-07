@@ -45,6 +45,19 @@ constexpr uintptr_t G_RUN_FRAME = 0x4da970;        // int (int parcial, int limi
 auto Com_Printf = (void(__cdecl*)(const char*, ...))0x42c130;
 auto Cmd_AddCommand = (void(__cdecl*)(const char*, void (*)()))0x41bb00;
 auto ClientConnect = (int(__cdecl*)(int))0x4e8f40;
+auto Dvar_FindVar = (uint8_t*(__cdecl*)(const char*))0x431260;  // valor en +8
+
+const char* MapName()
+{
+    uint8_t* d = Dvar_FindVar("mapname");
+    const char* name = d ? *(const char**)(d + 8) : nullptr;
+    return name ? name : "";
+}
+
+void Cbuf_AddText(const char* text)
+{
+    asm volatile("call *%1" : "+a"(text) : "r"((uintptr_t)0x41afc0) : "ecx", "edx", "memory");
+}
 
 struct Msg {  // msg_t
     int overflowed;
@@ -93,7 +106,7 @@ void ClientBegin(int n) { asm volatile("call *%1" : "+a"(n) : "r"(CLIENT_BEGIN) 
 // ---------- red ----------
 constexpr uint16_t PORT = 28962;
 constexpr uint32_t MAGIC = 0x504f4332;  // "2COP"
-enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CMD = 'C', M_SNAP = 'S' };
+enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CMD = 'C', M_SNAP = 'S', M_REJOIN = 'R' };
 enum Role { NONE, HOST, JOINER } g_role;
 SOCKET g_sock = INVALID_SOCKET;
 
@@ -102,6 +115,9 @@ struct Remote {
     sockaddr_in addr;
 } g_remote[MAX_CLIENTS];
 DWORD g_joinedAt[MAX_CLIENTS];  // host: cuando entro cada remoto
+DWORD g_levelStart;              // host: G_InitGame (nivel nuevo o partida cargada)
+bool g_downed[MAX_CLIENTS];      // host: caido esperando que lo levanten
+float g_reviveTime[MAX_CLIENTS]; // host: segundos que un companero lleva levantandolo
 
 sockaddr_in g_host;
 bool g_joined;
@@ -440,9 +456,10 @@ void JoinerApplyAnims(const uint8_t* p, int len)
 // (vueltas por segundo), +0x24 nombre.
 constexpr int PS_CLIENTNUM = 0xa8;
 constexpr int PS_PMFLAGS = 0xc, PS_ORIGIN = 0x14, PS_VELOCITY = 0x20, PS_YAW = 0xc8, ES_PITCH = 0x44, ES_ROLL = 0x4c;
-enum BodyAnim { BA_IDLE, BA_WALK, BA_RUN, BA_BACK, BA_LEFT, BA_RIGHT, BA_COUNT };
+enum BodyAnim { BA_IDLE, BA_WALK, BA_RUN, BA_BACK, BA_LEFT, BA_RIGHT, BA_DOWNED, BA_COUNT };
 const char* const kBodyAnimName[BA_COUNT] = {"stand_aim_straight", "stand_walk_combat_loop_01", "combatrun_forward_1",
-                                             "combatrun_back",     "combatrun_left",            "combatrun_right"};
+                                             "combatrun_back",     "combatrun_left",            "combatrun_right",
+                                             "wounded_crawlidle"};
 uint8_t* g_bodyTree[MAX_CLIENTS];
 int g_bodyAnim[MAX_CLIENTS] = {-1, -1, -1, -1};
 uint8_t* g_humanXAnim;
@@ -535,6 +552,7 @@ void CreateBody(int n)
 
 int ChooseBodyAnim(int n)
 {
+    if (g_downed[n]) return BA_DOWNED;
     uint8_t* ps = GClient(n);
     const float* v = (const float*)(ps + PS_VELOCITY);
     float speed = sqrtf(v[0] * v[0] + v[1] * v[1]);
@@ -629,6 +647,158 @@ void PlayersAsBodies(bool on)
     }
 }
 
+// ---------- caidos ----------
+// Como en CoD1: con algun remoto, un jugador que se queda sin vida cae (no se mueve ni dispara, no recibe dano) y un
+// companero lo levanta acercandose y manteniendo Usar 3 s. Si no queda nadie en pie muere el host de verdad: eso es lo
+// que hace fallar la mision en el SP y volver al ultimo punto de control con todos. Un remoto no muere nunca (su
+// muerte hacia que el host recargue el nivel).
+// G_Damage (0x528050, cdecl): targ, inflictor, attacker, dir, point, dano, flags, medio, parte del cuerpo.
+// gentity: +0x13c vida, +0x140 vida maxima; gclient +0x108 la vida que muestra el HUD.
+constexpr uintptr_t G_DAMAGE = 0x528050;
+constexpr int GE_HEALTH = 0x13c, GE_MAXHEALTH = 0x140, GC_HEALTH = 0x108;
+constexpr int BUTTON_USE = 8, REVIVE_DIST = 80;
+constexpr float REVIVE_SECONDS = 3;
+using GDamageFn = void(__cdecl*)(uint8_t*, uint8_t*, uint8_t*, float*, float*, int, int, int, int);
+GDamageFn g_gDamage;
+
+bool AnyRemote()
+{
+    for (int n = 1; n < MAX_CLIENTS; ++n)
+        if (g_remote[n].active) return true;
+    return false;
+}
+
+bool PlayerIn(int n) { return n == 0 || (g_remote[n].active && *(int*)(GClient(n) + GC_CONNECTED) == 2); }
+
+int PlayerOf(const uint8_t* ent)  // numero de jugador de una gentity, o -1
+{
+    if (!ent) return -1;
+    int off = (int)(ent - (const uint8_t*)G_ENTITIES);
+    return off >= 0 && off % GENTITY_SIZE == 0 && off / GENTITY_SIZE < MAX_CLIENTS ? off / GENTITY_SIZE : -1;
+}
+
+void SetHealth(int n, int h)
+{
+    *(int*)(Entity(n) + GE_HEALTH) = h;
+    *(int*)(GClient(n) + GC_HEALTH) = h;
+}
+
+bool AnyOtherStanding(int n)
+{
+    for (int m = 0; m < MAX_CLIENTS; ++m)
+        if (m != n && PlayerIn(m) && !g_downed[m] && *(int*)(Entity(m) + GE_HEALTH) > 0) return true;
+    return false;
+}
+
+// Mensaje en pantalla para todos, como iprintln/iprintlnbold (0x4ebc00): comando "gm"/"gmb" del servidor al cliente
+// local (SV_SendServerCommand 0x44a3b0, ECX = cliente, 0 = el local); su bloque de comandos les llega a los remotos.
+void Announce(bool bold, const char* text)
+{
+    char cmd[256];
+    snprintf(cmd, sizeof cmd, "%s \"%s\"", bold ? "gmb" : "gm", text);
+    const char* fmt = "%s";
+    int cl = 0;
+    asm volatile("push %1\n\tpush %2\n\tcall *%3\n\tadd $8, %%esp" : "+c"(cl) : "r"(cmd), "r"(fmt), "r"((uintptr_t)0x44a3b0)
+                 : "eax", "edx", "memory");
+}
+
+void SetDowned(int n, bool down)
+{
+    g_downed[n] = down;
+    g_reviveTime[n] = 0;
+    Log("jugador %d: %s", n + 1, down ? "caido" : "levantado");
+    char text[128];
+    snprintf(text, sizeof text, down ? "^1Player %d is down^7: get close and hold Use for 3 seconds"
+                                     : "^2Player %d was revived", n + 1);
+    Announce(down, text);
+}
+
+extern "C" void __cdecl Cod2_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, float* dir, float* point,
+                                     int damage, int dflags, int mod, int part)
+{
+    int n = PlayerOf(targ);
+    if (g_role != HOST || !AnyRemote() || n < 0 || !PlayerIn(n)) {
+        g_gDamage(targ, inflictor, attacker, dir, point, damage, dflags, mod, part);
+        return;
+    }
+    int a = PlayerOf(attacker);
+    if (a >= 0 && a != n) return;  // un jugador no lastima a otro (a si mismo si, como en el SP)
+    if (g_downed[n]) return;       // caido: ya no recibe dano
+    // El dano final depende de la parte del cuerpo y la dificultad (G_Damage lo escala): se aplica con la vida
+    // inflada para que no muera adentro, se mide cuanto bajo y recien ahi se decide entre herido, caido o muerto.
+    constexpr int BOOST = 100000;
+    int health = *(int*)(targ + GE_HEALTH);
+    SetHealth(n, health + BOOST);
+    g_gDamage(targ, inflictor, attacker, dir, point, damage, dflags, mod, part);
+    int left = *(int*)(targ + GE_HEALTH) - BOOST;
+    Log("dano al jugador %d: %d (medio %d, atacante %d) -> vida %d", n + 1, damage, mod,
+        attacker ? (int)(attacker - (uint8_t*)G_ENTITIES) / GENTITY_SIZE : -1, left);
+    if (left > 0) {
+        SetHealth(n, left);
+    } else if (AnyOtherStanding(n)) {
+        SetHealth(n, 1);
+        SetDowned(n, true);
+    } else {
+        Log("jugador %d: cayo el ultimo en pie -> muere el host", n + 1);
+        if (n != 0) {
+            SetHealth(n, 1);
+            SetDowned(n, true);
+        }
+        if (g_downed[0]) g_downed[0] = false;
+        SetHealth(0, 1);
+        g_gDamage(Entity(0), inflictor, attacker, dir, point, BOOST, dflags, mod, part);
+    }
+}
+
+// caido: el usercmd queda sin movimiento ni botones (sigue mirando)
+void DownedCmd(uint8_t* cmd)
+{
+    *(int*)(cmd + 4) = 0;
+    cmd[0x18] = cmd[0x19] = cmd[0x1a] = 0;
+}
+
+// host, cada frame: un companero en pie cerca manteniendo Usar lo levanta
+void HostDowned(float dt)
+{
+    for (int n = 0; n < MAX_CLIENTS; ++n) {
+        if (!g_downed[n]) continue;
+        if (!PlayerIn(n)) {
+            g_downed[n] = false;
+            continue;
+        }
+        const float* o = (const float*)(GClient(n) + PS_ORIGIN);
+        int helper = -1;
+        for (int m = 0; m < MAX_CLIENTS && helper < 0; ++m) {
+            if (m == n || !PlayerIn(m) || g_downed[m]) continue;
+            const float* q = (const float*)(GClient(m) + PS_ORIGIN);
+            float dx = o[0] - q[0], dy = o[1] - q[1], dz = o[2] - q[2];
+            if (dx * dx + dy * dy + dz * dz < REVIVE_DIST * REVIVE_DIST &&
+                (*(int*)(Client(m) + CL_LASTUSERCMD + 4) & BUTTON_USE))
+                helper = m;
+        }
+        bool helped = helper >= 0;
+        if (helped && g_reviveTime[n] == 0)
+            Log("jugador %d levanta al %d (botones %x)", helper + 1, n + 1, *(int*)(Client(helper) + CL_LASTUSERCMD + 4));
+        g_reviveTime[n] = helped ? g_reviveTime[n] + dt : 0;
+        if (g_reviveTime[n] >= REVIVE_SECONDS) {
+            int max = *(int*)(Entity(n) + GE_MAXHEALTH);
+            SetHealth(n, max > 1 ? max / 2 : 50);
+            SetDowned(n, false);
+        }
+    }
+}
+
+// prueba: coop2hurt <jugador 1-4> [dano] -> G_Damage del mundo sobre ese jugador
+void Cmd_Hurt()
+{
+    if (*(int*)0x6c0280 < 2) return;
+    const char** argv = (const char**)0x6bb680;
+    int n = atoi(argv[1]) - 1, damage = *(int*)0x6c0280 > 2 ? atoi(argv[2]) : 100000;
+    if (n < 0 || n >= MAX_CLIENTS || !PlayerIn(n)) return;
+    Cod2_GDamage(Entity(n), nullptr, nullptr, nullptr, nullptr, damage, 0, 0, 0);
+    Log("coop2hurt %d %d -> vida %d", n + 1, damage, *(int*)(Entity(n) + GE_HEALTH));
+}
+
 // ---------- host ----------
 // El script del nivel arma solo al jugador 1 (level.player): el remoto entra con el mismo equipo que el host.
 // playerState: +0xac granada (offHandIndex), +0xb0 arma, +0xc0 modelo de la vista, +0xf8 municion de reserva[128],
@@ -646,6 +816,11 @@ void HostJoin(const sockaddr_in& from)
     for (int i = 1; i < MAX_CLIENTS && !n; ++i)
         if (g_remote[i].active && SameAddr(g_remote[i].addr, from)) n = i;
     if (!n) {
+        // Primero un lugar que trajo la partida cargada (punto de control grabado con ese jugador): lo retoma tal cual,
+        // con su posicion, vida y armas. Si no, uno libre.
+        bool restored = false;
+        for (int i = 1; i < MAX_CLIENTS && !n; ++i)
+            if (!g_remote[i].active && *(int*)(GClient(i) + GC_CONNECTED) == 2) n = i, restored = true;
         for (int i = 1; i < MAX_CLIENTS && !n; ++i)
             if (!g_remote[i].active && !*(int*)(GClient(i) + GC_CONNECTED)) n = i;
         if (!n) {
@@ -657,6 +832,18 @@ void HostJoin(const sockaddr_in& from)
         memset(g_dobjSig[n], 0xff, sizeof g_dobjSig[n]);  // la primera vez va todo, incluso "sin DObj"
         memset(g_entKnown[n], 0, sizeof g_entKnown[n]);
         *(uint8_t**)(Client(n) + CL_GENTITY) = Entity(n);
+        *(int*)(GClient(n) + PS_CLIENTNUM) = n;  // el SP lo deja en 0: el cliente remoto se tomaria por el host
+        float* o = (float*)(GClient(n) + PS_ORIGIN);
+        if (restored) {
+            Log("host: %s:%d retoma al jugador %d de la partida cargada en %.0f %.0f %.0f", inet_ntoa(from.sin_addr),
+                ntohs(from.sin_port), n + 1, o[0], o[1], o[2]);
+            Com_Printf("^2COOP: player %d is back\n", n + 1);
+            Packet p(M_ACCEPT);
+            p.Put<int>(n);
+            p.Send(from);
+            return;
+        }
+        *(uint8_t**)(Entity(n) + GE_CLIENT) = GClient(n);  // G_FreeEntity lo borra si el lugar quedo vacio
         // ClientConnect empieza con la init de caminos de la IA (call 0x516bc0), pensada para el inicio del nivel: a
         // mitad de partida deja una lista circular y el juego se cuelga (igual que en CoD1). Se saltea.
         uint8_t saved[5];
@@ -666,12 +853,14 @@ void HostJoin(const sockaddr_in& from)
         ClientConnect(n);
         if (skip) hook::Write(PATH_INIT_CALL, saved, 5);
         ClientBegin(n);
-        *(int*)(GClient(n) + PS_CLIENTNUM) = n;  // el SP lo deja en 0: el cliente remoto se tomaria por el host
+        *(int*)(GClient(n) + PS_CLIENTNUM) = n;
         CopyLoadout(n);
         // aparece donde esta el host (el punto de inicio del mapa puede quedar lejos o fuera de la zona de juego)
-        float* o = (float*)(GClient(n) + 0x14);
-        memcpy(o, GClient(0) + 0x14, 12);
+        memcpy(o, GClient(0) + PS_ORIGIN, 12);
         memset(GClient(n) + 0x20, 0, 12);  // velocidad
+        *(int*)(Entity(n) + GE_MAXHEALTH) = *(int*)(Entity(0) + GE_MAXHEALTH);  // el SP solo se la pone al jugador 1
+        SetHealth(n, *(int*)(Entity(n) + GE_MAXHEALTH));
+        g_downed[n] = false;
         Log("host: %s:%d entra como jugador %d en %.0f %.0f %.0f", inet_ntoa(from.sin_addr), ntohs(from.sin_port), n + 1,
             o[0], o[1], o[2]);
         Com_Printf("^2COOP: a player joined (player %d)\n", n + 1);
@@ -683,10 +872,24 @@ void HostJoin(const sockaddr_in& from)
 
 void HostUsercmd(const sockaddr_in& from, const uint8_t* cmd, int len)
 {
+    bool known = false;
+    for (int n = 1; n < MAX_CLIENTS; ++n) known |= g_remote[n].active && SameAddr(g_remote[n].addr, from);
+    if (!known) {  // el host cargo una partida o cambio de nivel: los remotos entran de nuevo
+        static DWORD last;
+        if (GetTickCount() - last > 500) {
+            last = GetTickCount();
+            Packet p(M_REJOIN);
+            const char* map = MapName();
+            p.Put(map, (int)strlen(map) + 1);
+            p.Send(from);
+        }
+        return;
+    }
     for (int n = 1; n < MAX_CLIENTS; ++n) {
         if (!g_remote[n].active || !SameAddr(g_remote[n].addr, from)) continue;
         if (len < USERCMD_SIZE || *(int*)(GClient(n) + GC_CONNECTED) != 2) return;
         memcpy(Client(n) + CL_LASTUSERCMD, cmd, USERCMD_SIZE);
+        if (g_downed[n]) DownedCmd(Client(n) + CL_LASTUSERCMD);
         ClientThink(n);
         static DWORD lastLog;
         static int count;
@@ -757,8 +960,25 @@ void HostCatchUp()
     }
 }
 
+// Un jugador de la partida cargada que no vuelve en 90 s se saca (si no, queda su cuerpo quieto en el mapa)
+constexpr DWORD GHOST_MS = 90000;  // el que se une recarga el mapa para volver
+constexpr uintptr_t G_FREE_ENTITY = 0x4d7c30;  // cdecl (gentity)
+void HostDropGhosts()
+{
+    if (GetTickCount() - g_levelStart < GHOST_MS) return;
+    for (int n = 1; n < MAX_CLIENTS; ++n) {
+        if (g_remote[n].active || *(int*)(GClient(n) + GC_CONNECTED) != 2) continue;
+        Log("host: el jugador %d de la partida cargada no volvio, se saca", n + 1);
+        g_downed[n] = false;
+        ((void(__cdecl*)(uint8_t*))G_FREE_ENTITY)(Entity(n));
+        *(int*)(GClient(n) + GC_CONNECTED) = 0;
+        *(uint8_t**)(Client(n) + CL_GENTITY) = nullptr;
+    }
+}
+
 void HostSendSnapshots()
 {
+    HostDropGhosts();
     HostCatchUp();
     static DWORD lastLog;
     bool log = GetTickCount() - lastLog > 2000;
@@ -848,6 +1068,17 @@ void Poll()
                 g_slot = *(const int*)body;
                 Log("joiner: el host me acepto como jugador %d", g_slot + 1);
                 Com_Printf("^2COOP: connected to the host (player %d)\n", g_slot + 1);
+            } else if (type == M_REJOIN && g_joined && bodyLen > 1) {
+                // El host cargo un punto de control o paso a otro nivel. Su hora vuelve atras o empieza de nuevo y el
+                // cliente de aca no acepta snapshots mas viejos que los que ya mostro: se carga el mapa del host y,
+                // al terminar (G_InitGame), Cod2_Snapshot vuelve a pedir entrar.
+                g_joined = false;
+                buf[len - 1] = 0;
+                char cmd[96];
+                snprintf(cmd, sizeof cmd, "map %.63s\n", (const char*)body);
+                Log("joiner: el host cargo otra partida (%s), cargo el mapa y vuelvo a entrar", (const char*)body);
+                Com_Printf("^2COOP: the host loaded %s, loading it too\n", (const char*)body);
+                Cbuf_AddText(cmd);
             } else if (type == M_FULL) {
                 Com_Printf("^1COOP: the game is full\n");
                 g_role = NONE;
@@ -946,6 +1177,7 @@ extern "C" void __cdecl Cod2_LocalThink()
         }
         return;
     }
+    if (g_role == HOST && g_downed[0]) DownedCmd(Client(0) + CL_LASTUSERCMD);
     ClientThink(0);
 }
 
@@ -975,8 +1207,7 @@ void PollCommandFile()
     text[n] = '\n';
     text[n + 1] = 0;
     Log("cmd: %s", text);
-    char* t = text;
-    asm volatile("call *%1" : "+a"(t) : "r"((uintptr_t)0x41afc0) : "ecx", "edx", "memory");  // Cbuf_AddText
+    Cbuf_AddText(text);
 }
 
 // SV_FinishFrame, en lugar del snapshot del cliente local. Devuelve 1 para mandar el snapshot local.
@@ -989,6 +1220,7 @@ extern "C" int __cdecl Cod2_Snapshot()
         DWORD now = GetTickCount();
         float dt = last ? (now - last) / 1000.0f : 0.05f;
         last = now;
+        HostDowned(dt > 0.2f ? 0.2f : dt);
         HostBodies(dt > 0.2f ? 0.2f : dt);
         PlayersAsBodies(true);  // Cod2_AfterSnapshot lo deshace despues del snapshot local
         HostSendSnapshots();
@@ -1131,12 +1363,15 @@ extern "C" void __cdecl Cod2_SetupClients()
     *(int*)SV_GENTITIES_NUM = MAX_CLIENTS;
     for (auto& r : g_remote) r.active = false;  // mapa nuevo: los remotos vuelven a entrar
     for (int n = 0; n < MAX_CLIENTS; ++n) g_bodyTree[n] = nullptr, g_bodyAnim[n] = -1;  // las tablas de DObj se vacian
+    memset(g_downed, 0, sizeof g_downed);
+    g_levelStart = GetTickCount();
     g_joined = false;
     static bool cmds;
     if (!cmds) {
         cmds = true;
         Cmd_AddCommand("coop2host", Cmd_Host);
         Cmd_AddCommand("coop2join", Cmd_Join);
+        Cmd_AddCommand("coop2hurt", Cmd_Hurt);
     }
     Log("G_InitGame: %d jugadores, level.clients en %p", MAX_CLIENTS, (void*)g_clients);
 }
@@ -1182,6 +1417,21 @@ void Install()
     struct { uintptr_t at; uint8_t max; } limits[] = {{0x4e0d3d, MAX_CLIENTS}, {0x4e1125, MAX_CLIENTS}, {0x4e4f7b, MAX_CLIENTS - 1}};
     for (auto& l : limits)
         if (Expect(l.at, l.at == 0x4e1125 ? "\x83\xfe\x01" : "\x83\xff\x01", 3)) hook::Write(l.at + 2, &l.max, 1);
+    // G_FreeEntity devuelve a la lista libre toda entidad que no sea la 0 y G_Spawn la reusa: una entidad comun (un
+    // avion, una granada) en el lugar 1..3 pasa por ClientEndFrame (G_RunFrame lo llama para las entidades en uso
+    // menores que level.maxclients) y el juego se cae (0x4e804a). Las de los jugadores no vuelven a la lista.
+    const uint8_t maxClients = MAX_CLIENTS;
+    if (Expect(0x4d7ed9, "\x83\xf9\x01", 3)) hook::Write(0x4d7ed9 + 2, &maxClients, 1);
+    // G_LoadGame arma la lista libre de nuevo desde la entidad 1 (mov edi, 1 / mov eax, &g_entities[1]): desde la 4
+    if (Expect(0x4e4e99, "\xbf\x01\x00\x00\x00", 5) && Expect(0x4e4eae, "\xb8\xfc\x60\xb1\x01", 5)) {
+        uint32_t first = MAX_CLIENTS, ent = (uint32_t)(uintptr_t)Entity(MAX_CLIENTS);
+        hook::Write(0x4e4e99 + 1, &first, 4);
+        hook::Write(0x4e4eae + 1, &ent, 4);
+    }
+    // G_LoadGame corta ("client mis-match in savegame") si la partida tiene un jugador que no esta conectado: en vez
+    // del error se lo marca conectado (mov dword [esi+0x85c0], 2) y se carga; el remoto lo retoma al volver a entrar
+    if (Expect(0x4e4faa, "\x68\x54\x39\x58\x00\x6a\x01\xe8\x3a\x78\xf4\xff\x83\xc4\x08", 15))
+        hook::Write(0x4e4faa, "\xc7\x86\xc0\x85\x00\x00\x02\x00\x00\x00\x90\x90\x90\x90\x90", 15);
     // SV_Startup: svs.clients con lugar para 4 (malloc y memset)
     uint32_t size = MAX_CLIENTS * CLIENT_SIZE;
     hook::Write(0x448eca + 1, &size, 4);
@@ -1192,6 +1442,7 @@ void Install()
     CallTo(SNAPSHOT_CALL, (void*)Cod2_SnapshotStub, 5);
     CallTo(CGAME_SNAP_CALL, (void*)Cod2_CgameSnapStub, 5);
     g_runFrame = (int(__cdecl*)(int, int))hook::Inline(G_RUN_FRAME, (void*)Cod2_RunFrame, 5);
+    if (Expect(G_DAMAGE, "\x83\xec\x20\x53\x55", 5)) g_gDamage = (GDamageFn)hook::Inline(G_DAMAGE, (void*)Cod2_GDamage, 5);
     uint8_t jmp[9] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};  // DObj_Free -> Cod2_FreeDObjStub
     *(int32_t*)(jmp + 1) = (int32_t)((uintptr_t)Cod2_FreeDObjStub - (CL_DOBJ_FREE + 5));
     hook::Write(CL_DOBJ_FREE, jmp, 9);
