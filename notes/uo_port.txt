@@ -122,7 +122,7 @@ exe  0x40de40 CL_NetchanSetup        -> 0x40ef70
 exe  0x14b95d0 clc.netchan           -> 0x48c2470   (clc crece: rep stosd 0x100c -> 0x200c dwords)
 exe  0x448246 call SV_SpawnServer    -> 0x44a439 (destino 0x44e3f0 = SV_SpawnServer, era 0x44c1b0)
 exe  0x448d70                        -> 0x44af50 (prologo distinto: sin push ebx)
-exe  0x44d0a3 / 0x44d0a6             -> 0x44f3b3 / 0x44f3b6 (15/16, falta mirar)
+exe  0x44d0a3 / 0x44d0a6             -> 0x44f3b3 / 0x44f3b6 (15/16 bytes iguales)
 exe  0x476e00                        -> 0x47b550
 exe  0x4802f0 XModelPrecache         -> 0x484cc0
 exe  0x152bc64 / 0x152bc68 gclients  -> 0x47fefc4 / 0x47fefc8 (por vecinos 0x152bc58.. -> 0x47fefb8..)
