@@ -10,7 +10,7 @@ if errorlevel 1 exit /b 1
 g++ %OPT% -o build\codcoop_core.dll src\core.cpp -lws2_32
 if errorlevel 1 exit /b 1
 rem CoD2 (en prueba): modulo aparte que carga ddraw.dll en CoD2SP_s.exe; copia de desarrollo en game2\
-g++ %OPT% -o build\cod2coop.dll src\cod2.cpp
+g++ %OPT% -o build\cod2coop.dll src\cod2.cpp -lws2_32
 if errorlevel 1 exit /b 1
 if exist game2\CoD2SP_s.exe copy /y build\cod2coop.dll game2\ >nul && copy /y build\ddraw.dll game2\ >nul
 copy /y build\codcoop_core.dll game\codcoop_core.dll >nul
