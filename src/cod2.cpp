@@ -37,6 +37,7 @@ constexpr uintptr_t PATH_INIT_CALL = 0x4e8f48;                             // en
 constexpr uintptr_t RELIABLE_CALL = 0x44a93a, CL_DELIVER_COMMANDS = 0x40f580;  // EBX = bloque
 constexpr uintptr_t SNAPSHOT_CALL = 0x44a951, SV_SEND_SNAPSHOT = 0x44b180;     // EDI = client_t
 constexpr uintptr_t SV_BUILD_SNAPSHOT = 0x44b0c0;  // EAX = client_t
+constexpr uintptr_t CGAME_SNAP_CALL = 0x44a96e;    // el cliente procesa el snapshot (0x4a4330) y copia los estados
 constexpr uintptr_t SV_WRITE_SNAPSHOT = 0x44af00;  // ESI = msg, EDX = client_t
 constexpr uintptr_t CL_PARSE_MESSAGE = 0x40cf00;   // ESI = msg, EAX = numero de mensaje
 constexpr uintptr_t G_RUN_FRAME = 0x4da970;        // int (int parcial, int limite); 1 = frame terminado
@@ -173,7 +174,7 @@ constexpr uintptr_t CL_DOBJ_CREATE = 0x42f630;     // cdecl (modelos {XModel*, t
 constexpr uintptr_t CL_DOBJ_FREE = 0x42f760;       // ECX = entidad
 constexpr uintptr_t XANIM_CREATE_TREE = 0x42f280;  // EBX = XAnim -> arbol
 constexpr uintptr_t XANIM_ALLOC_INFO = 0x478830;   // ESI = arbol, cdecl (nodo) -> info
-enum : uint8_t { M_DOBJ = 'D', M_ANIM = 'N' };
+enum : uint8_t { M_DOBJ = 'D', M_ANIM = 'N', M_ENTS = 'E' };
 
 uint8_t* ClientDObj(int e)
 {
@@ -269,10 +270,73 @@ void HostSendDObjs(int n)
     flush(ap, M_ANIM);
 }
 
+bool g_ourFree;  // Cod2_KeepDObj deja borrar los cuerpos solo desde aca
+// El snapshot de CoD2 lleva solo los numeros de las entidades: el cliente copia el estado de cada una (los primeros
+// 0xa0 bytes de la gentity, 0x4a4330) directo de la memoria del juego. En el que se une esa memoria es la de su juego
+// congelado, asi que el host le manda el estado de las entidades de su snapshot: solo las palabras que cambiaron desde
+// lo ultimo que le mando, y cada tanto una entera (por si se perdio un paquete).
+constexpr int ES_WORDS = 0xa0 / 4, ENT_PACKET = 1200, REFRESH_PER_SNAP = 8;
+uint32_t g_entSent[MAX_CLIENTS][MAX_ENTS][ES_WORDS];
+bool g_entKnown[MAX_CLIENTS][MAX_ENTS];
+int g_entRefresh[MAX_CLIENTS];
+
+void HostSendEntities(int n)
+{
+    const int count = *(int*)0x8224a0;
+    const int* list = (const int*)0x8224a4;
+    static Packet ep(M_ENTS);
+    ep = Packet(M_ENTS);
+    int refresh = count ? g_entRefresh[n] % count : 0, refreshed = 0;
+    for (int i = 0; i < count; ++i) {
+        int e = list[i];
+        if (e < 0 || e >= MAX_ENTS) continue;
+        const uint32_t* now = (const uint32_t*)Entity(e);
+        uint32_t* sent = g_entSent[n][e];
+        bool full = !g_entKnown[n][e] || (refreshed < REFRESH_PER_SNAP && i >= refresh && ++refreshed);
+        uint8_t mask[5] = {};
+        int words = 0;
+        for (int w = 0; w < ES_WORDS; ++w)
+            if (full || now[w] != sent[w]) mask[w >> 3] |= 1 << (w & 7), ++words;
+        if (!words) continue;
+        if (ep.len + 7 + words * 4 > ENT_PACKET) {
+            ep.Send(g_remote[n].addr);
+            ep = Packet(M_ENTS);
+        }
+        ep.Put<uint16_t>((uint16_t)e);
+        ep.Put(mask, 5);
+        for (int w = 0; w < ES_WORDS; ++w)
+            if (mask[w >> 3] & (1 << (w & 7))) ep.Put(now[w]), sent[w] = now[w];
+        g_entKnown[n][e] = true;
+    }
+    if (ep.len > 5) ep.Send(g_remote[n].addr);
+    g_entRefresh[n] = refresh + REFRESH_PER_SNAP;
+}
+
+// joiner: se escribe en sus gentities (su juego no corre); el cliente lo copia al procesar el snapshot
+void JoinerApplyEntities(const uint8_t* p, int len)
+{
+    const uint8_t* end = p + len;
+    while (p + 7 <= end) {
+        int e = *(const uint16_t*)p;
+        const uint8_t* mask = p + 2;
+        p += 7;
+        if (e >= MAX_ENTS) return;
+        uint32_t* st = (uint32_t*)Entity(e);
+        for (int w = 0; w < ES_WORDS; ++w) {
+            if (!(mask[w >> 3] & (1 << (w & 7)))) continue;
+            if (p + 4 > end) return;
+            st[w] = *(const uint32_t*)p;
+            p += 4;
+        }
+    }
+}
+
 void FreeClientDObj(int e)
 {
     int ent = e;
+    g_ourFree = true;
     asm volatile("call *%1" : "+c"(ent) : "r"(CL_DOBJ_FREE) : "eax", "edx", "memory");
+    g_ourFree = false;
 }
 
 uint8_t* CreateTree(uint8_t* xanim)
@@ -374,6 +438,7 @@ void JoinerApplyAnims(const uint8_t* p, int len)
 // del jugador pasa a "general" (eType 0, sin cabeceo): el cliente dibuja su DObj; despues vuelve a ser jugador.
 // XAnim: nodo i en +0xc + i*8 {u16 hijos, u16 padre, ..., XAnimParts* si es hoja}; XAnimParts +8 frecuencia
 // (vueltas por segundo), +0x24 nombre.
+constexpr int PS_CLIENTNUM = 0xa8;
 constexpr int PS_PMFLAGS = 0xc, PS_ORIGIN = 0x14, PS_VELOCITY = 0x20, PS_YAW = 0xc8, ES_PITCH = 0x44, ES_ROLL = 0x4c;
 enum BodyAnim { BA_IDLE, BA_WALK, BA_RUN, BA_BACK, BA_LEFT, BA_RIGHT, BA_COUNT };
 const char* const kBodyAnimName[BA_COUNT] = {"stand_aim_straight", "stand_walk_combat_loop_01", "combatrun_forward_1",
@@ -555,6 +620,7 @@ void HostJoin(const sockaddr_in& from)
         g_remote[n] = {true, from};
         g_joinedAt[n] = GetTickCount();
         memset(g_dobjSig[n], 0xff, sizeof g_dobjSig[n]);  // la primera vez va todo, incluso "sin DObj"
+        memset(g_entKnown[n], 0, sizeof g_entKnown[n]);
         *(uint8_t**)(Client(n) + CL_GENTITY) = Entity(n);
         // ClientConnect empieza con la init de caminos de la IA (call 0x516bc0), pensada para el inicio del nivel: a
         // mitad de partida deja una lista circular y el juego se cuelga (igual que en CoD1). Se saltea.
@@ -565,6 +631,7 @@ void HostJoin(const sockaddr_in& from)
         ClientConnect(n);
         if (skip) hook::Write(PATH_INIT_CALL, saved, 5);
         ClientBegin(n);
+        *(int*)(GClient(n) + PS_CLIENTNUM) = n;  // el SP lo deja en 0: el cliente remoto se tomaria por el host
         // aparece donde esta el host (el punto de inicio del mapa puede quedar lejos o fuera de la zona de juego)
         float* o = (float*)(GClient(n) + 0x14);
         memcpy(o, GClient(0) + 0x14, 12);
@@ -663,6 +730,7 @@ void HostSendSnapshots()
     for (int n = 1; n < MAX_CLIENTS; ++n) {
         if (!g_remote[n].active || *(int*)(GClient(n) + GC_CONNECTED) != 2) continue;
         uint8_t* cl = Client(n);
+        *(int*)(GClient(n) + PS_CLIENTNUM) = n;
         static uint8_t data[SNAP_MAX];
         Msg m{0, data, SNAP_MAX, 0, 0, 0};
         uint8_t* a = cl;
@@ -682,6 +750,7 @@ void HostSendSnapshots()
         p.Put(m.cursize);
         p.Put(data, m.cursize);
         p.Send(g_remote[n].addr);
+        HostSendEntities(n);
         HostSendDObjs(n);
         if (log) {
             const float* o = (const float*)(GClient(n) + 0x14);
@@ -752,6 +821,8 @@ void Poll()
                 JoinerApplyDObjs(body, bodyLen);
             } else if (type == M_ANIM && g_joined) {
                 JoinerApplyAnims(body, bodyLen);
+            } else if (type == M_ENTS && g_joined) {
+                JoinerApplyEntities(body, bodyLen);
             }
         }
     }
@@ -906,6 +977,27 @@ extern "C" int __cdecl Cod2_Snapshot()
     return 1;
 }
 
+// DObj_Free (0x42f760, ECX = entidad): el juego borra el DObj de los jugadores (no tienen modelo) en cada frame y el
+// cliente nunca llega a copiar el cuerpo. Devuelve 1 para no borrarlo. G_FreeEntity (fin del nivel, cargar partida)
+// si lo borra.
+constexpr uintptr_t G_FREE_ENTITY_FREE = 0x4d7d41;
+extern "C" int __cdecl Cod2_KeepDObj(int e, uintptr_t caller)
+{
+    if (g_ourFree || e < 0 || e >= MAX_CLIENTS || !g_bodyTree[e] || caller == G_FREE_ENTITY_FREE) return 0;
+    uint8_t* d = ClientDObj(e);
+    if (!d || *(uint8_t**)d != g_bodyTree[e]) return 0;
+    static uintptr_t seen[8];
+    for (auto& s : seen) {
+        if (s == caller) break;
+        if (!s) {
+            s = caller;
+            Log("cuerpo %d: el juego lo quiere borrar desde %08x", e + 1, (unsigned)caller);
+            break;
+        }
+    }
+    return 1;
+}
+
 extern "C" void __cdecl Cod2_AfterSnapshot()
 {
     if (g_role == HOST) PlayersAsBodies(false);
@@ -957,15 +1049,40 @@ _Cod2_SnapshotStub:
     jz 2f
     mov eax, 0x44b180
     call eax
-2:  pushad
+2:  ret
+.globl _Cod2_CgameSnapStub
+_Cod2_CgameSnapStub:
+    push dword ptr [esp+8]
+    push dword ptr [esp+8]
+    mov eax, 0x4a4330
+    call eax
+    add esp, 8
+    pushad
     call _Cod2_AfterSnapshot
     popad
     ret
+.globl _Cod2_FreeDObjStub
+_Cod2_FreeDObjStub:
+    pushad
+    push dword ptr [esp+32]
+    push ecx
+    call _Cod2_KeepDObj
+    add esp, 8
+    test eax, eax
+    popad
+    jnz 3f
+    push edi
+    movsx edi, word ptr [ecx*2 + 0x74a980]
+    push 0x42f769
+    ret
+3:  ret
 .att_syntax
 )");
+extern "C" void Cod2_FreeDObjStub();
 extern "C" void Cod2_LocalThinkStub();
 extern "C" void Cod2_ReliableStub();
 extern "C" void Cod2_SnapshotStub();
+extern "C" void Cod2_CgameSnapStub();
 
 // Llamado desde G_InitGame: level.clients pasa a un arreglo de 4 y las entidades 0..3 quedan para jugadores.
 extern "C" void __cdecl Cod2_SetupClients()
@@ -978,6 +1095,7 @@ extern "C" void __cdecl Cod2_SetupClients()
     *(int*)LEVEL_NUM_ENTITIES = MAX_CLIENTS;
     *(int*)SV_GENTITIES_NUM = MAX_CLIENTS;
     for (auto& r : g_remote) r.active = false;  // mapa nuevo: los remotos vuelven a entrar
+    for (int n = 0; n < MAX_CLIENTS; ++n) g_bodyTree[n] = nullptr, g_bodyAnim[n] = -1;  // las tablas de DObj se vacian
     g_joined = false;
     static bool cmds;
     if (!cmds) {
@@ -1020,7 +1138,9 @@ void Install()
     if (!Expect(0x448eca, "\x68\x08\xaa\x00\x00", 5) || !Expect(0x448edd, "\x68\x08\xaa\x00\x00", 5) ||
         !Expect(INIT_CLIENTS_AT, "\x89\x2d\x2c\x24\x82\x00", 6) || !Expect(LOCAL_THINK_CALL, "\xe8\x65\xdf\x0d\x00", 5) ||
         !Expect(RELIABLE_CALL, "\xe8\x41\x4c\xfc\xff", 5) || !Expect(SNAPSHOT_CALL, "\xe8\x2a\x08\x00\x00", 5) ||
-        !Expect(G_RUN_FRAME, "\xa1\x5c\x10\xc6\x01", 5))
+        !Expect(G_RUN_FRAME, "\xa1\x5c\x10\xc6\x01", 5) ||
+        !Expect(CGAME_SNAP_CALL, "\xe8\xbd\x99\x05\x00", 5) ||
+        !Expect(CL_DOBJ_FREE, "\x57\x0f\xbf\x3c\x4d\x80\xa9\x74\x00", 9))
         return;
     // guardado: puntero a cliente como indice+1 (WriteField1 0x4e0d3d, ReadField 0x4e1125) y numero de cliente
     // (G_LoadGame 0x4e4f7b); los tres comparan con 1
@@ -1035,7 +1155,11 @@ void Install()
     CallTo(LOCAL_THINK_CALL, (void*)Cod2_LocalThinkStub, 5);
     CallTo(RELIABLE_CALL, (void*)Cod2_ReliableStub, 5);
     CallTo(SNAPSHOT_CALL, (void*)Cod2_SnapshotStub, 5);
+    CallTo(CGAME_SNAP_CALL, (void*)Cod2_CgameSnapStub, 5);
     g_runFrame = (int(__cdecl*)(int, int))hook::Inline(G_RUN_FRAME, (void*)Cod2_RunFrame, 5);
+    uint8_t jmp[9] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};  // DObj_Free -> Cod2_FreeDObjStub
+    *(int32_t*)(jmp + 1) = (int32_t)((uintptr_t)Cod2_FreeDObjStub - (CL_DOBJ_FREE + 5));
+    hook::Write(CL_DOBJ_FREE, jmp, 9);
     Log("parches puestos (svs.clients x%d, G_InitGame, red)", MAX_CLIENTS);
 }
 }  // namespace

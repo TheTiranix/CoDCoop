@@ -41,6 +41,19 @@ switch ($What) {
     for ($i = 0; $i -lt 30 -and (Test-Path $f); $i++) { Start-Sleep -Milliseconds 100 }
     Set-Content -Path $f -Value $A2 -Encoding ascii -NoNewline
   }
+  'shot' {  # shot <archivo.png> [host|join]: captura esa ventana (la pone adelante un momento)
+    Add-Type 'using System; using System.Runtime.InteropServices; public static class J2 { [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f); [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out R r); [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); public struct R { public int L, T, Rt, B; } }'
+    Add-Type -AssemblyName System.Drawing
+    [J2]::SetProcessDPIAware() | Out-Null
+    $ps = Games; $p = if ($A2 -eq 'join') { $ps[-1] } else { $ps[0] }
+    [J2]::SetWindowPos($p.MainWindowHandle, [IntPtr](-1), 0, 0, 0, 0, 0x13) | Out-Null; Start-Sleep -Milliseconds 400
+    $r = New-Object J2+R; [J2]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+    $bmp = New-Object System.Drawing.Bitmap ($r.Rt - $r.L), ($r.B - $r.T)
+    [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
+    $bmp.Save($A1)
+    [J2]::SetWindowPos($p.MainWindowHandle, [IntPtr](-2), 0, 0, 0, 0, 0x13) | Out-Null
+    $A1
+  }
   'kill' {
     Games | Stop-Process -Force
     Start-Sleep 1
