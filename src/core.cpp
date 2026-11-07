@@ -486,6 +486,20 @@ void CheckPathLists(const char* when)
     Log("listas de caminos %s: %d, rotas %d", when, lists, bad);
 }
 
+// Un checkpoint guardado con remotos los carga como jugadores del juego sin cliente del motor (HookLoad). Con la
+// partida ya cargada se desconectan (ClientDisconnect, vmMain 4): el remoto vuelve a entrar como al empezar el nivel.
+void HostDropGhosts()
+{
+    uint8_t* reloading = g::Cvar_FindVar("g_reloading");
+    if (g::sv_state != 2 || !g::svs_clients || !g::sv_gameClients || (reloading && *(int*)(reloading + 0x20))) return;
+    for (int n = 1; n < g::MAX_CLIENTS; ++n) {
+        if (S->remote[n].active || *(int*)(g::Client(n) + g::CL_STATE) || !*(int*)(g::PlayerState(n) + g::GC_CONNECTED))
+            continue;
+        Log("host: el jugador %d vino en el checkpoint sin nadie en ese lugar, se desconecta", n);
+        g::GameCall(4, n);
+    }
+}
+
 void HostJoin(const sockaddr_in& from, Reader r)
 {
     int qport = r.Get<int>(), lastIncoming = r.Get<int>(), serverCmdSeq = r.Get<int>(), relSeq = r.Get<int>();
@@ -493,6 +507,7 @@ void HostJoin(const sockaddr_in& from, Reader r)
     if (g::sv_state != 2) return;  // sin partida no hay a donde unirse
     uint8_t* reloading = g::Cvar_FindVar("g_reloading");
     if (reloading && *(int*)(reloading + 0x20)) return;  // mision fallida: esperar a que cargue el checkpoint
+    HostDropGhosts();
     const char* hostMap = g::CvarString("mapname");
     const char* theirMap = r.p < r.end && memchr(r.p, 0, r.end - r.p) ? (const char*)r.p : nullptr;
     if (theirMap && _stricmp(theirMap, hostMap) != 0) {  // que cargue el mapa del host y vuelva (sin ocupar slot)
@@ -1639,6 +1654,20 @@ void HookUsercmd(bool on)
             g_clGetUserCmdTramp, "CL_GetUserCmd");
 }
 
+// Checkpoint con remotos: el juego guarda a todos los jugadores conectados y al cargar (solo con el host) cortaba
+// con "G_LoadGame: client mis-match in savegame". Se carga igual (el `jne` que saltea el error pasa a `jmp`): los
+// remotos guardados quedan en el juego sin cliente del motor, y HostDropGhosts los desconecta. No guardarlos rompia
+// otras entidades que los nombran (el camion con el remoto enganchado: cierre al cargar en UO).
+void HookLoad(uint8_t* game, bool on)
+{
+    uint8_t* jne = game + (g::uo ? 0x30b74 : 0x2de6f);  // jne +0x0d (cliente conectado) antes de "push msg; call"
+    if ((jne[0] == 0x75 || jne[0] == 0xEB) && jne[1] == 0x0d && jne[2] == 0x68) {
+        const uint8_t op = on ? 0xEB : 0x75;
+        if (jne[0] != op) hook::Write((uintptr_t)jne, &op, 1);
+        if (on) Log("checkpoint: carga tambien a los remotos guardados");
+    }
+}
+
 void HookDamage(bool on)
 {
     uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
@@ -1654,6 +1683,7 @@ void HookDamage(bool on)
                 Log("getent: con varios jugadores devuelve el primero");
             }
         }
+        HookLoad(game, true);
         uint8_t* fn = game + G_DAMAGE_RVA;
         if (memcmp(fn, kGDamagePrologue, sizeof kGDamagePrologue) != 0) {
             Log("G_Damage: prologo inesperado, sin opcion de dano entre jugadores");
@@ -1669,6 +1699,7 @@ void HookDamage(bool on)
         hook::Write((uintptr_t)(game + G_DAMAGE_RVA), kGDamagePrologue, sizeof kGDamagePrologue);
         g_damageHooked = nullptr;
     }
+    if (!on && game) HookLoad(game, false);
 }
 
 // Jugadores que se traspasan: en training (y otros mapas) todos aparecen en el mismo lugar y encimados nadie se
@@ -1807,6 +1838,7 @@ void HostDropRemote(int n)
 // M_PING cada segundo: en pausa (pantalla de victoria, "Haz clic para iniciar") no salen snapshots.
 void HostCheckRemotes()
 {
+    HostDropGhosts();
     DWORD now = GetTickCount();
     static DWORD lastPing;
     bool ping = now - lastPing > 1000;

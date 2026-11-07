@@ -62,7 +62,7 @@ inline const int PS_CLIENTNUM = (int)A(0x9c, 0xc4), PS_WEAPON = (int)A(0xa0, 0xc
 inline const int PS_DELTA_ANGLES = (int)A(0x48, 0x4c), PS_GROUNDENT = (int)A(0x54, 0x58), PS_HEALTH = (int)A(0xe4, 0x10c),
                  PS_MAXHEALTH = (int)A(0xec, 0x114);
 // gclient_t (despues del playerState)
-inline const int GC_CMD = (int)A(0x73e4, 0x822c), GC_LINKANGLES = (int)A(0x74c8, 0x8310);
+inline const int GC_CONNECTED = (int)A(0x73e0, 0x8228), GC_CMD = (int)A(0x73e4, 0x822c), GC_LINKANGLES = (int)A(0x74c8, 0x8310);
 // gentity_t: entityState igual hasta +0x9c (UO agrega 4 bytes al final), despues todo corrido
 inline const int GE_CLIENT = (int)A(0x104, 0x108), GE_CONTENTS = (int)A(0xc4, 0xc8), GE_ORIGIN = (int)A(0xe0, 0xe4),
                  GE_FLAGS = (int)A(0x134, 0x13c), GE_HEALTH = (int)A(0x1d8, 0x1e0), GE_LINK = (int)A(0x294, 0x29c);

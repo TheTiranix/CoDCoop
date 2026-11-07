@@ -141,5 +141,5 @@ cgamex86 0x1e8d0 CG_BuildSolidList   -> 0x25ff0
 - XAnimCreateTree (0x4331f0) pide la memoria sin tipo (CoD1: tipo 5, que se suelta al cambiar de nivel): al
   recargar, el que se une agotaba la memoria de scripts (MT_AllocIndex). Se liberan a mano: infos al recibir
   M_RELOAD, el bloque (MT_FreeIndex 0x45fd30, ECX indice, EAX bytes) cuando ya cargo el mapa nuevo.
-- Mision fallida: el checkpoint guardado con un remoto da "G_LoadGame: client mis-match in savegame" (igual que
-  en CoD1, pendiente).
+- Mision fallida: el checkpoint guardado con un remoto daba "G_LoadGame: client mis-match in savegame" (igual que
+  en CoD1). Arreglado en los dos: HookLoad + HostDropGhosts (ver ARQUITECTURA.md).

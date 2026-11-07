@@ -283,8 +283,11 @@ Modulo de juego (gamex86.dll): vmMain 0x2001cd70. 0 Init, 1 Shutdown, 2 ClientCo
   JoinerFreeDObj olvida el arbol si su XAnim ya no esta en la tabla, y JoinerApplyDObj espera si falta el XAnim.
 - Al volver a entrar sin cerrar el juego, el servidor local queda en sv_state 1 con el mapa cargado: JoinerHijack
   lo acepta (antes pedia 2 y recargaba el mapa en un ciclo sin fin).
-- Pendiente: un punto de control guardado con un remoto conectado no carga ("G_LoadGame: client mis-match in
-  savegame"); los del principio del nivel (guardados sin remotos) si.
+- Checkpoint guardado con remotos: el juego guarda a todos los clientes conectados y G_LoadGame cortaba con
+  "client mis-match in savegame" (solo el host conecta al cargar). HookLoad cambia ese `jne` por `jmp` (gamex86
+  0x2de6f, UO 0x30b74): el remoto se carga como jugador del juego sin cliente del motor y HostDropGhosts le hace
+  ClientDisconnect con la partida ya cargada (antes de aceptar a alguien en ese lugar). No guardar a los remotos
+  no sirve: otras entidades los nombran (el camion con el remoto enganchado cerraba UO al cargar, 0x20049188).
 
 ## Menu Cooperativo: daño entre jugadores y desconectarse
 - "Daño entre jugadores" es un ITEM_TYPE_YESNO sobre coop_friendlyfire (lo usa el host).
