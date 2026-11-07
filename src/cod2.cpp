@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include "hook.h"
 
 namespace {
@@ -367,6 +368,177 @@ void JoinerApplyAnims(const uint8_t* p, int len)
     }
 }
 
+// ---------- cuerpos de los jugadores (en el SP el jugador no tiene modelo) ----------
+// Con algun remoto, el host le arma a cada jugador un DObj de soldado (cuerpo, cabeza y casco de algun soldado aliado
+// del nivel, con el XAnim de los humanos) y lo anima segun como se mueve. Mientras se arman los snapshots la entidad
+// del jugador pasa a "general" (eType 0, sin cabeceo): el cliente dibuja su DObj; despues vuelve a ser jugador.
+// XAnim: nodo i en +0xc + i*8 {u16 hijos, u16 padre, ..., XAnimParts* si es hoja}; XAnimParts +8 frecuencia
+// (vueltas por segundo), +0x24 nombre.
+constexpr int PS_PMFLAGS = 0xc, PS_ORIGIN = 0x14, PS_VELOCITY = 0x20, PS_YAW = 0xc8, ES_PITCH = 0x44, ES_ROLL = 0x4c;
+enum BodyAnim { BA_IDLE, BA_WALK, BA_RUN, BA_BACK, BA_LEFT, BA_RIGHT, BA_COUNT };
+const char* const kBodyAnimName[BA_COUNT] = {"stand_aim_straight", "stand_walk_combat_loop_01", "combatrun_forward_1",
+                                             "combatrun_back",     "combatrun_left",            "combatrun_right"};
+uint8_t* g_bodyTree[MAX_CLIENTS];
+int g_bodyAnim[MAX_CLIENTS] = {-1, -1, -1, -1};
+uint8_t* g_humanXAnim;
+int g_animIndex[BA_COUNT];
+
+uint8_t* XAnimNode(uint8_t* xanim, int i) { return xanim + 0xc + i * 8; }
+uint8_t* XAnimLeafParts(uint8_t* xanim, int i)
+{
+    uint8_t* node = XAnimNode(xanim, i);
+    return *(uint16_t*)node ? nullptr : *(uint8_t**)(node + 4);
+}
+
+int AnimIndex(uint8_t* xanim, const char* name)
+{
+    int size = *(int*)(xanim + 4);
+    for (int i = 0; i < size; ++i) {
+        uint8_t* parts = XAnimLeafParts(xanim, i);
+        const char* n = parts && !IsBadReadPtr(parts, 0x28) ? *(const char**)(parts + 0x24) : nullptr;
+        if (n && !IsBadReadPtr(n, 1) && !_stricmp(n, name)) return i;
+    }
+    return -1;
+}
+
+const char* ModelName(void* model) { return model ? *(const char**)((uint8_t*)model + 0x88) : ""; }
+
+// Partes de un soldado aliado del nivel (de algun DObj con el XAnim de los humanos): cuerpo, cabeza, casco/gorra.
+int FindBodyModels(void** out)
+{
+    for (int pass = 0; pass < 2; ++pass)
+        for (int e = MAX_CLIENTS; e < MAX_ENTS; ++e) {
+            uint8_t* d = ClientDObj(e);
+            uint8_t* tree = d ? *(uint8_t**)d : nullptr;
+            if (!tree || *(int*)(*(uint8_t**)tree + 4) < 500 || d[0x18] < 2) continue;
+            const char* body = ModelName(*(void**)(d + 0x1c));
+            if (_strnicmp(body, "character_", 10)) continue;
+            bool allied = strstr(body, "russian") || strstr(body, "british") || strstr(body, "american") || strstr(body, "us_");
+            if (pass == 0 && !allied) continue;
+            int count = 0;
+            for (int k = 0; k < d[0x18] && count < 3; ++k) {
+                void* m = *(void**)(d + 0x1c + k * 4);
+                const char* name = ModelName(m);
+                if (k < 2 || !_strnicmp(name, "helmet", 6) || !_strnicmp(name, "gear_", 5)) out[count++] = m;
+            }
+            g_humanXAnim = *(uint8_t**)tree;
+            return count;
+        }
+    return 0;
+}
+
+void CreateBody(int n)
+{
+    void* parts[3];
+    int count = FindBodyModels(parts);
+    if (count < 2 || !g_humanXAnim) return;
+    struct { void* model; const char* tag; int noCollide; } models[3];
+    for (int k = 0; k < count; ++k) models[k] = {parts[k], nullptr, 1};
+    if (ClientDObj(n)) FreeClientDObj(n);
+    uint8_t* tree = CreateTree(g_humanXAnim);
+    CreateClientDObj(n, models, count, tree);
+    g_bodyTree[n] = tree;
+    g_bodyAnim[n] = -1;
+    for (int a = 0; a < BA_COUNT; ++a) g_animIndex[a] = AnimIndex(g_humanXAnim, kBodyAnimName[a]);
+    Log("cuerpo %d: %s + %s%s%s", n + 1, ModelName(parts[0]), ModelName(parts[1]), count > 2 ? " + " : "",
+        count > 2 ? ModelName(parts[2]) : "");
+}
+
+int ChooseBodyAnim(int n)
+{
+    uint8_t* ps = GClient(n);
+    const float* v = (const float*)(ps + PS_VELOCITY);
+    float speed = sqrtf(v[0] * v[0] + v[1] * v[1]);
+    if (speed < 5) return BA_IDLE;
+    float rel = atan2f(v[1], v[0]) * 180.0f / 3.14159265f - *(float*)(ps + PS_YAW);
+    rel -= 360.0f * floorf((rel + 180.0f) / 360.0f);  // a [-180, 180)
+    if (fabsf(rel) <= 50) return speed < 120 ? BA_WALK : BA_RUN;
+    if (fabsf(rel) >= 130) return BA_BACK;
+    return rel > 0 ? BA_LEFT : BA_RIGHT;
+}
+
+uint8_t* TreeInfo(uint8_t* tree, int node, bool alloc)
+{
+    uint16_t* slot = (uint16_t*)(tree + 8 + node * 2);
+    if (!*slot && alloc) {
+        uint8_t* t = tree;
+        uint8_t* info;
+        asm volatile("push %2\n\tcall *%3\n\tadd $4, %%esp" : "=a"(info), "+S"(t) : "r"(node), "r"(XANIM_ALLOC_INFO)
+                     : "ecx", "edx", "memory");
+        if (!info) return nullptr;
+        memset(info + 0xc, 0, 0x1c);
+        *(uint16_t*)(info + 2) = 0xffff;
+        *(uint16_t*)info = *(uint16_t*)(info + 4) = *(uint16_t*)(info + 6) = 0;
+    }
+    return *slot ? (uint8_t*)XANIM_INFOS + *slot * INFO_SIZE : nullptr;
+}
+
+void AnimateBody(int n, float dt)
+{
+    uint8_t* tree = g_bodyTree[n];
+    uint8_t* xanim = *(uint8_t**)tree;
+    int size = *(int*)(xanim + 4);
+    int want = ChooseBodyAnim(n), leaf = g_animIndex[want];
+    if (leaf <= 0) return;
+    if (want != g_bodyAnim[n]) {  // todo apagado y la cadena hoja -> raiz con peso 1
+        for (int a = 0; a < size; ++a)
+            if (uint8_t* info = TreeInfo(tree, a, false)) *(float*)(info + 0x1c) = *(float*)(info + 0x20) = 0;
+        for (int node = leaf;; node = *(uint16_t*)(XAnimNode(xanim, node) + 2)) {
+            uint8_t* info = TreeInfo(tree, node, true);
+            if (info) *(float*)(info + 0x1c) = *(float*)(info + 0x20) = *(float*)(info + 0x24) = 1;
+            if (!node) break;
+        }
+        g_bodyAnim[n] = want;
+    }
+    uint8_t* info = TreeInfo(tree, leaf, false);
+    float freq = *(float*)(XAnimLeafParts(xanim, leaf) + 8);
+    if (!info) return;
+    float& time = *(float*)(info + 0xc);
+    *(float*)(info + 0x10) = time;  // hora anterior
+    time += dt * freq;
+    if (time >= 1) time -= floorf(time);
+}
+
+// host, cada frame antes de los snapshots
+void HostBodies(float dt)
+{
+    bool anyRemote = false;
+    for (int n = 1; n < MAX_CLIENTS; ++n) anyRemote |= g_remote[n].active;
+    for (int n = 0; n < MAX_CLIENTS; ++n) {
+        bool want = anyRemote && *(int*)(GClient(n) + GC_CONNECTED) == 2;
+        uint8_t* d = ClientDObj(n);
+        bool has = g_bodyTree[n] && d && *(uint8_t**)d == g_bodyTree[n];
+        if (!want) {
+            if (has) FreeClientDObj(n);
+            g_bodyTree[n] = nullptr;
+            continue;
+        }
+        if (!has) CreateBody(n);
+        if (g_bodyTree[n]) AnimateBody(n, dt);
+    }
+}
+
+// mientras se arman los snapshots, los jugadores con cuerpo se mandan como entidades generales (el cliente, 0x4acf30,
+// no dibuja jugadores y dibuja las generales con su DObj de la tabla del cliente 0x77f480) y sin cabeceo
+constexpr uint8_t ET_BODY = 0;  // 9 (como soldado) no: el juego lo trata como IA y se cae (0x4e804a)
+struct SavedPlayer { uint8_t eType; float pitch, roll; } g_savedPlayer[MAX_CLIENTS];
+void PlayersAsBodies(bool on)
+{
+    for (int n = 0; n < MAX_CLIENTS; ++n) {
+        if (!g_bodyTree[n]) continue;
+        uint8_t* s = Entity(n);
+        if (on) {
+            g_savedPlayer[n] = {s[0], *(float*)(s + ES_PITCH), *(float*)(s + ES_ROLL)};
+            s[0] = ET_BODY;
+            *(float*)(s + ES_PITCH) = *(float*)(s + ES_ROLL) = 0;
+        } else {
+            s[0] = g_savedPlayer[n].eType;
+            *(float*)(s + ES_PITCH) = g_savedPlayer[n].pitch;
+            *(float*)(s + ES_ROLL) = g_savedPlayer[n].roll;
+        }
+    }
+}
+
 // ---------- host ----------
 void HostJoin(const sockaddr_in& from)
 {
@@ -431,7 +603,7 @@ void HostUsercmd(const sockaddr_in& from, const uint8_t* cmd, int len)
 // niveles como moscow, donde el punto de inicio queda encerrado y el script sube al host a un camion.
 constexpr float CATCHUP_DIST = 800;
 constexpr DWORD CATCHUP_MS = 5000;
-constexpr int TRAIL = 40, PS_ORIGIN = 0x14, PS_VELOCITY = 0x20, PS_GROUNDENT = 0x60, GE_CURRENT_ORIGIN = 0xdc;
+constexpr int TRAIL = 40, PS_GROUNDENT = 0x60, GE_CURRENT_ORIGIN = 0xdc;
 float g_trail[TRAIL][3];
 int g_trailCount, g_trailNext;
 DWORD g_farSince[MAX_CLIENTS];
@@ -683,11 +855,36 @@ extern "C" uint8_t* __cdecl Cod2_Reliable(uint8_t* block)
     return block;
 }
 
+// pruebas: un comando de consola escrito en cod2coop.cmd (cod2coop_join.cmd en el que se une) se ejecuta y el
+// archivo se borra (tools/run2.ps1 cmd host|join "<comando>")
+char g_cmdFile[MAX_PATH];
+void PollCommandFile()
+{
+    FILE* f = g_cmdFile[0] ? fopen(g_cmdFile, "rb") : nullptr;
+    if (!f) return;
+    char text[1024];
+    size_t n = fread(text, 1, sizeof text - 2, f);
+    fclose(f);
+    DeleteFileA(g_cmdFile);
+    text[n] = '\n';
+    text[n + 1] = 0;
+    Log("cmd: %s", text);
+    char* t = text;
+    asm volatile("call *%1" : "+a"(t) : "r"((uintptr_t)0x41afc0) : "ecx", "edx", "memory");  // Cbuf_AddText
+}
+
 // SV_FinishFrame, en lugar del snapshot del cliente local. Devuelve 1 para mandar el snapshot local.
 extern "C" int __cdecl Cod2_Snapshot()
 {
+    PollCommandFile();
     Poll();
     if (g_role == HOST) {
+        static DWORD last;
+        DWORD now = GetTickCount();
+        float dt = last ? (now - last) / 1000.0f : 0.05f;
+        last = now;
+        HostBodies(dt > 0.2f ? 0.2f : dt);
+        PlayersAsBodies(true);  // Cod2_AfterSnapshot lo deshace despues del snapshot local
         HostSendSnapshots();
         return 1;
     }
@@ -707,6 +904,11 @@ extern "C" int __cdecl Cod2_Snapshot()
         return 0;
     }
     return 1;
+}
+
+extern "C" void __cdecl Cod2_AfterSnapshot()
+{
+    if (g_role == HOST) PlayersAsBodies(false);
 }
 
 // el que se une no corre su juego local
@@ -755,7 +957,10 @@ _Cod2_SnapshotStub:
     jz 2f
     mov eax, 0x44b180
     call eax
-2:  ret
+2:  pushad
+    call _Cod2_AfterSnapshot
+    popad
+    ret
 .att_syntax
 )");
 extern "C" void Cod2_LocalThinkStub();
@@ -842,6 +1047,8 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID)
         GetModuleFileNameA(self, p, MAX_PATH);
         strcpy(strrchr(p, '\\') + 1, strstr(GetCommandLineA(), "coop2join") ? "cod2coop_join.log" : "cod2coop.log");
         g_log = fopen(p, "w");
+        strcpy(g_cmdFile, p);
+        strcpy(strrchr(g_cmdFile, '.'), ".cmd");
         Install();
     }
     return TRUE;

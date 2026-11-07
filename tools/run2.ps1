@@ -36,6 +36,11 @@ switch ($What) {
     while ((Get-Date) -lt $end) { [R2]::PostMessage($p.MainWindowHandle, 0x100, [IntPtr]$vk, $l) | Out-Null; Start-Sleep -Milliseconds 50 }
     [R2]::PostMessage($p.MainWindowHandle, 0x101, [IntPtr]$vk, [IntPtr](1 -bor ($sc -shl 16) -bor 0xC0000000)) | Out-Null
   }
+  'cmd' {  # cmd host|join "<comando de consola>"
+    $f = if ($A1 -eq 'join') { "$game\cod2coop_join.cmd" } else { "$game\cod2coop.cmd" }
+    for ($i = 0; $i -lt 30 -and (Test-Path $f); $i++) { Start-Sleep -Milliseconds 100 }
+    Set-Content -Path $f -Value $A2 -Encoding ascii -NoNewline
+  }
   'kill' {
     Games | Stop-Process -Force
     Start-Sleep 1
