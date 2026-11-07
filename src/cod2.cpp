@@ -1,7 +1,7 @@
 // CoD2 (CoD2SP_s.exe 1.3), en prueba. El servidor de un jugador reserva un solo cliente: esto lo amplia a 4 y
 // agrega una red UDP propia. Lo carga ddraw.dll (loader.cpp) desde la carpeta del juego.
 //   coop2host            el que tiene la partida (puerto UDP 28962)
-//   coop2join            se une a la IP que sigue a "+coop2join" en la linea de comandos (mismo mapa cargado)
+//   coop2join <IP>       se une a esa IP (127.0.0.1 si no hay; mismo mapa cargado)
 // El cliente de CoD2 no recibe paquetes: el servidor le arma el snapshot como mensaje (SV_SendClientSnapshot) y se lo
 // pasa directo al parser (CL_ParseServerMessage). El host arma ese mismo mensaje para cada remoto y lo manda por UDP;
 // el que se une congela su juego local y le pasa a su parser lo que llega.
@@ -904,10 +904,9 @@ void Cmd_Host()
 
 void Cmd_Join()
 {
-    // la IP se toma de la linea de comandos ("+coop2join 1.2.3.4"): todavia no hay Cmd_Argv de CoD2
-    const char* c = strstr(GetCommandLineA(), "coop2join");
+    // coop2join <IP> (cmd_argc 0x6c0280, cmd_argv 0x6bb680, como los lee writeconfig 0x42ea40)
     char ip[64] = "127.0.0.1";
-    if (c) sscanf(c + 9, " %63[0-9.]", ip);
+    if (*(int*)0x6c0280 >= 2) sscanf(((const char**)0x6bb680)[1], "%63[0-9.]", ip);
     if (!OpenSocket(0)) return;
     g_host = {};
     g_host.sin_family = AF_INET;

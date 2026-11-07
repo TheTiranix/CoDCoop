@@ -5,3 +5,4 @@
 4 RCDATA "installer/README.txt"
 5 RCDATA "build/steam_api.dll"
 6 RCDATA "game/uo/pakz_coop.pk3"  // solo si hay United Offensive (installer.cpp)
+7 RCDATA "build/cod2coop.dll"  // Call of Duty 2 (installer.cpp)

@@ -13,7 +13,14 @@ What you need
   its Co-op menu. The compass does not show teammates there yet.
 
 Install
-- Run "Install CoD Coop.exe" and accept the game folder (the one with CoDSP.exe).
+- Run "Install CoD Coop.exe" and accept the game folder (the one with CoDSP.exe, or
+  CoD2SP_s.exe for Call of Duty 2). It detects the game and installs the matching files.
+
+Call of Duty 2 (experimental)
+- Version 1.3 (CoD2SP_s.exe), with co-op installed on every PC.
+- Everyone starts the same mission. The host types coop2host in the console; the others
+  type coop2join followed by the host's IP (UDP port 28962).
+- Teammates see each other, move and shoot. There is no Co-op menu yet.
 
 Play
 1. Start Call of Duty as usual and open "Co-op" (main menu).
@@ -42,3 +49,5 @@ Uninstall
 - Delete from the game folder: ddraw.dll, codcoop_core.dll, steam_api.dll,
   main\pakz_coop.pk3, uo\pakz_coop.pk3 and the codcoop_tmp folder. If there are .bak files
   (ddraw.dll.bak or steam_api.dll.bak), remove the .bak from their names.
+- Call of Duty 2: delete ddraw.dll and cod2coop.dll from the game folder (and rename
+  ddraw.dll.bak back to ddraw.dll if there is one).
