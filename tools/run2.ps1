@@ -19,6 +19,11 @@ switch ($What) {
     $a = "+set fs_homepath D:\CoDCoop\run\join2 +set r_fullscreen 0 +set logfile 2 +set com_introplayed 1 +set com_maxfps 125 +devmap $A1 +wait 300 +coop2join 127.0.0.1"
     (Start-Process "$game\CoD2SP_s.exe" -WorkingDirectory $game -ArgumentList $a -PassThru).Id
   }
+  'joinmenu' {  # el que se une queda en el menu principal y pide entrar (carga solo el mapa del host)
+    Remove-Item "$game\__CoD2SP_s" -Force -ErrorAction SilentlyContinue
+    $a = "+set fs_homepath D:\CoDCoop\run\join2 +set r_fullscreen 0 +set logfile 2 +set com_introplayed 1 +set com_maxfps 125 +wait 300 +coop2join 127.0.0.1"
+    (Start-Process "$game\CoD2SP_s.exe" -WorkingDirectory $game -ArgumentList $a -PassThru).Id
+  }
   'click' {
     $l = [IntPtr](200 -bor (200 -shl 16))
     foreach ($p in Games) {

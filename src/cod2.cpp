@@ -121,6 +121,7 @@ float g_reviveTime[MAX_CLIENTS]; // host: segundos que un companero lleva levant
 
 sockaddr_in g_host;
 bool g_joined;
+DWORD g_lastLevelFrame;  // ultimo frame con nivel corriendo (Cod2_Snapshot)
 DWORD g_mapLoadSince;  // joiner: cargando el mapa del host (no pide entrar hasta G_InitGame)
 int g_slot;
 DWORD g_lastJoinTry;
@@ -825,12 +826,32 @@ void CopyLoadout(int n)
     for (auto& r : parts) memcpy(to + r.at, from + r.at, r.len);
 }
 
-void HostJoin(const sockaddr_in& from)
+// "carga este mapa y volve a entrar": al que se une desde otro mapa o el menu, y a los que el host ya no conoce
+// (cargo un punto de control o cambio de nivel)
+void SendRejoin(const sockaddr_in& to)
+{
+    static DWORD last;
+    if (GetTickCount() - last < 500) return;
+    last = GetTickCount();
+    Packet p(M_REJOIN);
+    const char* map = MapName();
+    p.Put(map, (int)strlen(map) + 1);
+    p.Send(to);
+}
+
+void HostJoin(const sockaddr_in& from, const uint8_t* body, int len)
 {
     int n = 0;
     for (int i = 1; i < MAX_CLIENTS && !n; ++i)
         if (g_remote[i].active && SameAddr(g_remote[i].addr, from)) n = i;
     if (!n) {
+        const char* theirs = len > 0 && !body[len - 1] ? (const char*)body : "";
+        if (_stricmp(theirs, MapName())) {
+            Log("host: %s:%d pide entrar desde \"%s\": que cargue %s", inet_ntoa(from.sin_addr), ntohs(from.sin_port),
+                theirs, MapName());
+            SendRejoin(from);
+            return;
+        }
         // Primero un lugar que trajo la partida cargada (punto de control grabado con ese jugador): lo retoma tal cual,
         // con su posicion, vida y armas. Si no, uno libre.
         bool restored = false;
@@ -892,14 +913,7 @@ void HostUsercmd(const sockaddr_in& from, const uint8_t* cmd, int len)
     bool known = false;
     for (int n = 1; n < MAX_CLIENTS; ++n) known |= g_remote[n].active && SameAddr(g_remote[n].addr, from);
     if (!known) {  // el host cargo una partida o cambio de nivel: los remotos entran de nuevo
-        static DWORD last;
-        if (GetTickCount() - last > 500) {
-            last = GetTickCount();
-            Packet p(M_REJOIN);
-            const char* map = MapName();
-            p.Put(map, (int)strlen(map) + 1);
-            p.Send(from);
-        }
+        SendRejoin(from);
         return;
     }
     for (int n = 1; n < MAX_CLIENTS; ++n) {
@@ -1148,7 +1162,10 @@ void HostSendSnapshots()
 // ---------- joiner ----------
 void JoinerSendJoin()
 {
-    Packet(M_JOIN).Send(g_host);
+    Packet p(M_JOIN);
+    const char* map = MapName();  // "" en el menu principal
+    p.Put(map, (int)strlen(map) + 1);
+    p.Send(g_host);
     g_lastJoinTry = GetTickCount();
 }
 
@@ -1189,7 +1206,7 @@ void Poll()
         const uint8_t* body = buf + 5;
         int bodyLen = len - 5;
         if (g_role == HOST) {
-            if (type == M_JOIN) HostJoin(from);
+            if (type == M_JOIN) HostJoin(from, body, bodyLen);
             else if (type == M_CMD) HostUsercmd(from, body, bodyLen);
         } else if (g_role == JOINER && SameAddr(from, g_host)) {
             if (type == M_ACCEPT && bodyLen >= 4 && !g_joined) {
@@ -1197,10 +1214,11 @@ void Poll()
                 g_slot = *(const int*)body;
                 Log("joiner: el host me acepto como jugador %d", g_slot + 1);
                 Com_Printf("^2COOP: connected to the host (player %d)\n", g_slot + 1);
-            } else if (type == M_REJOIN && g_joined && bodyLen > 1) {
-                // El host cargo un punto de control o paso a otro nivel. Su hora vuelve atras o empieza de nuevo y el
-                // cliente de aca no acepta snapshots mas viejos que los que ya mostro: se carga el mapa del host y,
-                // al terminar (G_InitGame), Cod2_Snapshot vuelve a pedir entrar.
+            } else if (type == M_REJOIN && !g_mapLoadSince && bodyLen > 1 && !buf[len - 1] &&
+                       (g_joined || _stricmp((const char*)body, MapName()))) {
+                // El host cargo un punto de control o paso a otro nivel (su hora vuelve atras o empieza de nuevo y el
+                // cliente de aca no acepta snapshots mas viejos que los que ya mostro), o este juego esta en otro mapa
+                // o en el menu: se carga el mapa del host y, al terminar (G_InitGame), se vuelve a pedir entrar.
                 g_joined = false;
                 g_mapLoadSince = GetTickCount();  // si pidiera entrar ya, el host lo haria aparecer quieto durante la carga
                 buf[len - 1] = 0;
@@ -1344,6 +1362,7 @@ void PollCommandFile()
 extern "C" int __cdecl Cod2_Snapshot()
 {
     PollCommandFile();
+    g_lastLevelFrame = GetTickCount();
     Poll();
     if (g_role == HOST) {
         static DWORD last;
@@ -1394,6 +1413,28 @@ extern "C" int __cdecl Cod2_KeepDObj(int e, uintptr_t caller)
         }
     }
     return 1;
+}
+
+void RegisterCommands()
+{
+    static bool done;
+    if (done) return;
+    done = true;
+    Cmd_AddCommand("coop2host", Cmd_Host);
+    Cmd_AddCommand("coop2join", Cmd_Join);
+    Cmd_AddCommand("coop2hurt", Cmd_Hurt);
+    Cmd_AddCommand("coop2save", Cmd_Save);
+}
+
+// Com_Frame (0x42ed20), en cada frame del juego: sin nivel corriendo (menu, carga) Cod2_Snapshot no se llama; el que
+// se une igual pide entrar y recibe el mapa a cargar. El host solo atiende dentro del nivel.
+extern "C" void __cdecl Cod2_ComFrame()
+{
+    RegisterCommands();  // coop2join tambien desde el menu principal
+    if (g_role != JOINER || GetTickCount() - g_lastLevelFrame < 500) return;
+    Poll();
+    if (g_mapLoadSince && GetTickCount() - g_mapLoadSince > 120000) g_mapLoadSince = 0;
+    if (!g_joined && !g_mapLoadSince && GetTickCount() - g_lastJoinTry > 1000) JoinerSendJoin();
 }
 
 extern "C" void __cdecl Cod2_AfterSnapshot()
@@ -1459,6 +1500,13 @@ _Cod2_CgameSnapStub:
     call _Cod2_AfterSnapshot
     popad
     ret
+.globl _Cod2_ComFrameStub
+_Cod2_ComFrameStub:
+    pushad
+    call _Cod2_ComFrame
+    popad
+    push 0x44f0a0
+    ret
 .globl _Cod2_FreeDObjStub
 _Cod2_FreeDObjStub:
     pushad
@@ -1477,6 +1525,7 @@ _Cod2_FreeDObjStub:
 .att_syntax
 )");
 extern "C" void Cod2_FreeDObjStub();
+extern "C" void Cod2_ComFrameStub();
 extern "C" void Cod2_LocalThinkStub();
 extern "C" void Cod2_ReliableStub();
 extern "C" void Cod2_SnapshotStub();
@@ -1499,14 +1548,7 @@ extern "C" void __cdecl Cod2_SetupClients()
     g_levelStart = GetTickCount();
     g_joined = false;
     g_mapLoadSince = 0;
-    static bool cmds;
-    if (!cmds) {
-        cmds = true;
-        Cmd_AddCommand("coop2host", Cmd_Host);
-        Cmd_AddCommand("coop2join", Cmd_Join);
-        Cmd_AddCommand("coop2hurt", Cmd_Hurt);
-        Cmd_AddCommand("coop2save", Cmd_Save);
-    }
+    RegisterCommands();
     Log("G_InitGame: %d jugadores, level.clients en %p", MAX_CLIENTS, (void*)g_clients);
 }
 
@@ -1575,6 +1617,7 @@ void Install()
     CallTo(RELIABLE_CALL, (void*)Cod2_ReliableStub, 5);
     CallTo(SNAPSHOT_CALL, (void*)Cod2_SnapshotStub, 5);
     CallTo(CGAME_SNAP_CALL, (void*)Cod2_CgameSnapStub, 5);
+    if (Expect(0x42edea, "\xe8\xb1\x02\x02\x00", 5)) CallTo(0x42edea, (void*)Cod2_ComFrameStub, 5);  // Com_Frame
     g_runFrame = (int(__cdecl*)(int, int))hook::Inline(G_RUN_FRAME, (void*)Cod2_RunFrame, 5);
     if (Expect(G_DAMAGE, "\x83\xec\x20\x53\x55", 5)) g_gDamage = (GDamageFn)hook::Inline(G_DAMAGE, (void*)Cod2_GDamage, 5);
     uint8_t jmp[9] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};  // DObj_Free -> Cod2_FreeDObjStub

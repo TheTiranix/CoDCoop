@@ -18,9 +18,11 @@ Install
 
 Call of Duty 2 (experimental)
 - Version 1.3 (CoD2SP_s.exe), with co-op installed on every PC.
-- Everyone starts the same mission. The host types coop2host in the console; the others
-  type coop2join followed by the host's IP (UDP port 28962).
-- Teammates see each other, move and shoot. There is no Co-op menu yet.
+- The host starts a mission and types coop2host in the console. The others type
+  coop2join followed by the host's IP (UDP port 28962), even from the main menu: their
+  game loads the host's mission by itself.
+- Teammates see each other, shoot, ride the host's vehicles and revive each other (get
+  close and hold Use for 3 seconds). There is no Co-op menu yet.
 
 Play
 1. Start Call of Duty as usual and open "Co-op" (main menu).
