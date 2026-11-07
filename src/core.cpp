@@ -39,7 +39,13 @@ void CoopStatus(const char* fmt, ...)
     g::Cvar_Set("ui_coop_status", b);
 }
 
-// VM_Call 0x44f270: EAX = vm, 13 argumentos en la pila (ver game.h GameCall)
+// VM_Call: EAX = vm, 13 argumentos en la pila (ver game.h GameCall). Las direcciones que usan los asm de este
+// archivo estan en variables (CoD1 o UO).
+extern "C" {
+uintptr_t g_addrVMCall = g::A(0x44f270, 0x451570), g_addrAnimKnob = g::A(0x47d8b0, 0x4823e0),
+          g_addrAnimUpdate = g::A(0x47ccd0, 0x4817c0), g_addrCgSyscalls = g::A(0x401a50, 0x401b80);
+int g_cgEntityTrap = (int)g::A(0xf8, 0xfa);  // trap del cgame que devuelve el entityState del servidor
+}
 asm(R"(
 .intel_syntax noprefix
 .globl _CallVM
@@ -52,8 +58,7 @@ _CallVM:
     mov edi, esp
     mov ecx, 13
     rep movsd
-    mov edx, 0x44f270
-    call edx
+    call dword ptr [_g_addrVMCall]
     add esp, 52
     pop edi
     pop esi
@@ -75,7 +80,7 @@ enum Role { NONE, HOST, JOINER };
 struct Remote {
     bool active;
     sockaddr_in addr;
-    uint8_t lastEnt[g::MAX_GENTITIES][g::ENTSTATE_SIZE];
+    uint8_t lastEnt[g::MAX_GENTITIES][g::ENTSTATE_MAX];
     DWORD lastSent[g::MAX_GENTITIES];
     uint32_t dobjSig[g::MAX_GENTITIES];  // ultima forma de DObj mandada (0 = sin DObj)
     DWORD dobjSent[g::MAX_GENTITIES];
@@ -104,12 +109,25 @@ struct State {
 };
 State* S;
 
-struct ModelEntry {  // lo que recibe Com_ServerDObjCreate (0x476e00 resuelve tag -> hueso padre)
+struct ModelEntry {  // lo que recibe Com_ServerDObjCreate (0x476e00 resuelve tag -> hueso padre); CoD1 sin `extra`
     void* model;
     const char* tag;
     uint16_t flags;
     uint16_t pad;
+    int extra;  // UO: distinto de 0 marca el modelo en la mascara DObj+0x18
 };
+void DObjCreate(const ModelEntry* models, int num, void* tree, int ent, int u12)
+{
+    if (g::uo) return g::Com_ServerDObjCreate((void*)models, num, tree, ent, u12);
+    uint8_t packed[8][12];
+    for (int k = 0; k < num && k < 8; ++k) memcpy(packed[k], &models[k], 12);
+    g::Com_ServerDObjCreate(packed, num, tree, ent, u12);
+}
+void ReleaseInfo(uint8_t* tree, uint16_t* slot)
+{
+    g::XAnimFreeInfo(tree, *slot);
+    *slot = 0;
+}
 
 int BrokenPathLists(int* lists = nullptr);
 void JoinerLeave(const char* why);
@@ -129,11 +147,11 @@ void StatsTick()
     }
     if (g_statSnaps || g_statEnts || g_statRecv || g_statCtrl) {
         Log("stats 5s: snaps=%d ents=%d recv=%d ctrl=%d cls.state=%d serverMsgSeq=%d cl.snap(time=%d num=%d)", g_statSnaps,
-            g_statEnts, g_statRecv, g_statCtrl, g::cls_state, *(int*)0x14795c4, *(int*)0x1426e68, *(int*)0x1426e6c);
-        if (uint8_t* cg = (uint8_t*)GetModuleHandleA("cgamex86.dll")) {
-            uint8_t* snap = *(uint8_t**)(cg + 0x10b8ac);  // cg.snap
+            g_statEnts, g_statRecv, g_statCtrl, g::cls_state, g::clc_serverMessageSequence, g::cl_snapServerTime, g::cl_snapNum);
+        if (uint8_t* cg = (uint8_t*)GetModuleHandleA(g::CgameDll())) {
+            uint8_t* snap = *(uint8_t**)(cg + g::A(0x10b8ac, 0x25954c));  // cg.snap
             Log("  cgame %p: cg.snap=%p serverTime=%d nextSnap=%p", cg, snap, snap ? *(int*)(snap + 4) : -1,
-                *(void**)(cg + 0x10b8a8));
+                *(void**)(cg + g::A(0x10b8a8, 0x259548)));
         }
     }
     g_statSnaps = g_statEnts = g_statRecv = g_statCtrl = 0;
@@ -298,34 +316,33 @@ void SendGamestate(int n)
 // siempre era 0. Con 0, Pmove se choca con su propia entidad (allsolid) y el jugador no se mueve.
 void FixClientNum(int n)
 {
-    uint8_t* gameClients = *(uint8_t**)0x152bc64;
-    if (gameClients) *(int*)(gameClients + n * *(int*)0x152bc68 + 0x9c) = n;
+    if (uint8_t* ps = g::PlayerState(n)) *(int*)(ps + g::PS_CLIENTNUM) = n;
 }
 
 // El script de la mision solo arma a level.player: si un remoto no tiene armas (al entrar o al
-// reaparecer) recibe el mismo equipo que el host. ps: +0xa0 arma actual, +0xf4 ammo[64],
-// +0x1f4 cargador[64], +0x2f4 bits de armas, +0x2fc ranuras[6] (ver giveweapon gamex86 RVA 0x15020).
+// reaparecer) recibe el mismo equipo que el host. ps: arma actual, ammo[64], cargador[64], bits de armas, ranuras
+// (en UO 128 armas; ver giveweapon gamex86 RVA 0x15020 / UO 0x16c10 y game.h PS_*).
 // arma de vehiculo (clase 6 ametralladora / 7 cañon del tanque): no se copia ni cuenta como arma en la mano
 bool VehicleWeapon(int w)
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
-    uint8_t** defs = game ? *(uint8_t***)(game + 0x125650) : nullptr;
-    if (!defs || w <= 0 || w >= 64 || !defs[w]) return false;
-    int cls = *(int*)(defs[w] + 0x74);
-    return cls == 6 || cls == 7;
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
+    uint8_t** defs = game ? *(uint8_t***)(game + g::G_WEAPONDEFS) : nullptr;
+    if (!defs || w <= 0 || w >= g::MAX_WEAPONS || !defs[w]) return false;
+    return g::VehicleClass(*(int*)(defs[w] + g::WD_CLASS));
 }
 
 void GiveHostLoadout(int n)
 {
-    uint8_t* gameClients = *(uint8_t**)0x152bc64;
-    if (!gameClients) return;
-    uint8_t* host = gameClients;
-    uint8_t* ps = gameClients + n * *(int*)0x152bc68;
-    if (*(int*)(ps + 0xa0) || !*(int*)(host + 0xa0)) return;  // ya tiene un arma en la mano, o el host tampoco
-    if (VehicleWeapon(*(int*)(host + 0xa0))) return;          // el host va en el tanque: ver HostVehicles
-    if (!*(uint64_t*)(ps + 0x2f4)) memcpy(ps + 0xf4, host + 0xf4, 0x304 - 0xf4);
-    *(int*)(ps + 0xa0) = *(int*)(host + 0xa0);
-    Log("jugador %d: recibe el equipo del host (arma %d)", n, *(int*)(ps + 0xa0));
+    uint8_t* host = g::PlayerState(0);
+    if (!host) return;
+    uint8_t* ps = g::PlayerState(n);
+    if (*(int*)(ps + g::PS_WEAPON) || !*(int*)(host + g::PS_WEAPON)) return;  // ya tiene un arma en la mano, o el host tampoco
+    if (VehicleWeapon(*(int*)(host + g::PS_WEAPON))) return;                 // el host va en el tanque: ver HostVehicles
+    bool none = true;
+    for (int i = 0; i < g::MAX_WEAPONS / 32; ++i) none &= !((uint32_t*)(ps + g::PS_WEAPONS))[i];
+    if (none) memcpy(ps + g::PS_AMMO, host + g::PS_AMMO, g::PS_LOADOUT_END - g::PS_AMMO);
+    *(int*)(ps + g::PS_WEAPON) = *(int*)(host + g::PS_WEAPON);
+    Log("jugador %d: recibe el equipo del host (arma %d)", n, *(int*)(ps + g::PS_WEAPON));
 }
 
 // Armas que el nivel registro (sus modelos estan cargados): gamex86 +0x12eea0 itemRegistered[arma] (arma =
@@ -334,16 +351,16 @@ void GiveHostLoadout(int n)
 // Devuelve la primera aliada que encuentre, si no cualquiera; 0 si no hay.
 int PickLoadedWeapon(uint8_t* game)
 {
-    uint8_t** defs = *(uint8_t***)(game + 0x125650);
-    int count = *(int*)(game + 0x12564c), *registered = (int*)(game + 0x12eea0);
+    uint8_t** defs = *(uint8_t***)(game + g::G_WEAPONDEFS);
+    int count = *(int*)(game + g::G_NUMWEAPONS), *registered = (int*)(game + g::G_ITEMREGISTERED);
     static const char* const kPreferred[] = {"ppsh", "mosin", "thompson", "bar", "m1garand", "m1carbine", "sten",
                                              "enfield", "mp40", "mp44", "kar98k", ""};
     for (const char* want : kPreferred)
-        for (int w = 1; w <= count && w < 64; ++w) {
+        for (int w = 1; w <= count && w < g::MAX_WEAPONS; ++w) {
             if (!registered[w] || !defs[w]) continue;
-            int cls = *(int*)(defs[w] + 0x74);
+            int cls = *(int*)(defs[w] + g::WD_CLASS);
             const char* name = SafeStr(*(char**)(defs[w] + 4));
-            if (cls != 6 && cls != 7 && strstr(name, want)) return w;
+            if (!g::VehicleClass(cls) && strstr(name, want)) return w;
         }
     return 0;
 }
@@ -353,27 +370,30 @@ int PickLoadedWeapon(uint8_t* game)
 void GiveWeapon(uint8_t* game, int n, int w)
 {
     uint8_t* ent = g::Entity(n);
-    uint8_t* ps = *(uint8_t**)(ent + 0x104);
-    uint8_t* def = (*(uint8_t***)(game + 0x125650))[w];
+    uint8_t* ps = *(uint8_t**)(ent + g::GE_CLIENT);
+    uint8_t* def = (*(uint8_t***)(game + g::G_WEAPONDEFS))[w];
     int slot, ecx = w;
     uint8_t* edx = ps;
-    asm volatile("call *%3" : "=a"(slot), "+c"(ecx), "+d"(edx) : "r"(game + 0xb3e0) : "memory");
+    asm volatile("call *%3" : "=a"(slot), "+c"(ecx), "+d"(edx) : "r"(game + g::G_WEAPON_SLOT) : "memory");
     if (!slot) {
         Log("jugador %d: sin lugar para el arma %d", n, w);
         return;
     }
     int eax = w;
     uint8_t* esi = ps;
-    asm volatile("call *%2" : "+a"(eax), "+S"(esi) : "r"(game + 0xb000) : "ecx", "edx", "memory");
-    int amount = *(int*)(def + 0x198) - *(int*)(ps + 0xf4 + *(int*)(def + 0x1a0) * 4);
+    if (g::uo)  // UO: el arma va en la pila
+        asm volatile("push %0\n\tcall *%2\n\tadd $4, %%esp" : "+a"(eax), "+S"(esi) : "r"(game + g::G_WEAPON_GIVE) : "ecx", "edx", "memory");
+    else
+        asm volatile("call *%2" : "+a"(eax), "+S"(esi) : "r"(game + g::G_WEAPON_GIVE) : "ecx", "edx", "memory");
+    int amount = *(int*)(def + g::WD_MAXAMMO) - *(int*)(ps + g::PS_AMMO + *(int*)(def + g::WD_AMMOINDEX) * 4);
     if (amount > 0) {
         uint8_t* a = ent;
         asm volatile("push %3\n\tpush %2\n\tpush %1\n\tcall *%4\n\tadd $12, %%esp"
                      : "+a"(a)
-                     : "g"(w), "g"(amount), "g"(1), "r"(game + 0x1a940)
+                     : "g"(w), "g"(amount), "g"(1), "r"(game + g::G_ADD_AMMO)
                      : "ecx", "edx", "memory");
     }
-    *(int*)(ps + 0xa0) = w;
+    *(int*)(ps + g::PS_WEAPON) = w;
     Log("jugador %d: recibe el arma %s (%d)", n, SafeStr(*(char**)(def + 4)), w);
 }
 
@@ -392,21 +412,21 @@ void Cmd_CoopNet()
 // prueba: coopweapons -> armas que el nivel registro
 void Cmd_CoopWeapons()
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
     if (!game) return;
-    uint8_t** defs = *(uint8_t***)(game + 0x125650);
-    int count = *(int*)(game + 0x12564c), *registered = (int*)(game + 0x12eea0);
-    for (int w = 1; w <= count && w < 64; ++w)
+    uint8_t** defs = *(uint8_t***)(game + g::G_WEAPONDEFS);
+    int count = *(int*)(game + g::G_NUMWEAPONS), *registered = (int*)(game + g::G_ITEMREGISTERED);
+    for (int w = 1; w <= count && w < g::MAX_WEAPONS; ++w)
         if (defs[w] && registered[w])
-            Log("arma %d: %s clase %d mundo %s", w, SafeStr(*(char**)(defs[w] + 4)), *(int*)(defs[w] + 0x74),
-                SafeStr(*(char**)(defs[w] + 0x188)));
+            Log("arma %d: %s clase %d mundo %s", w, SafeStr(*(char**)(defs[w] + 4)), *(int*)(defs[w] + g::WD_CLASS),
+                SafeStr(*(char**)(defs[w] + g::WD_WORLDMODEL)));
     Log("arma elegida para pasajeros: %d", PickLoadedWeapon(game));
 }
 
 // prueba: coopgive <n> <arma> -> el jugador n recibe esa arma (numero de coopweapons) y la pone en la mano
 void Cmd_CoopGive()
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
     int n = atoi(g::Argv(1)), w = atoi(g::Argv(2));
     if (game && n >= 0 && n < g::MAX_CLIENTS && g::svs_clients && *(int*)(g::Client(n) + g::CL_STATE) == 1 && w > 0)
         GiveWeapon(game, n, w);
@@ -416,8 +436,7 @@ void Cmd_CoopGive()
 // remoto queda con el de por defecto (viewmodel_hands_us), que el nivel no cargo y se ve blanco.
 void CopyHostViewmodel(int n)
 {
-    uint8_t* gameClients = *(uint8_t**)0x152bc64;
-    if (gameClients) *(int*)(gameClients + n * *(int*)0x152bc68 + 0xac) = *(int*)(gameClients + 0xac);
+    if (uint8_t* ps = g::PlayerState(n)) *(int*)(ps + g::PS_VIEWMODEL) = *(int*)(g::PlayerState(0) + g::PS_VIEWMODEL);
 }
 
 // Brujula: el cgame dibuja a los aliados de la IA desde una tabla de 32 lugares (cgame+0x12601c, 16 bytes c/u: hora,
@@ -425,8 +444,8 @@ void CopyHostViewmodel(int n)
 // ultimos lugares (31 - jugador); solo chocarian con un aliado de la IA con indice de actor 28 o mas.
 void DrawTeamOnCompass(uint8_t mask, const float (*pos)[3], int self)
 {
-    uint8_t* cg = (uint8_t*)GetModuleHandleA("cgamex86.dll");
-    if (!cg) return;
+    uint8_t* cg = (uint8_t*)GetModuleHandleA(g::CgameDll());
+    if (!cg || g::uo) return;  // UO: tabla de la brujula sin verificar
     int now = *(int*)(cg + 0x11e0a4);  // cg.time
     for (int p = 0; p < g::MAX_CLIENTS; ++p) {
         if (p == self || !(mask >> p & 1)) continue;
@@ -441,8 +460,8 @@ float g_teamPos[g::MAX_CLIENTS][3];        // x, y, rumbo de cada uno
 // diagnostico: cuantas listas de enlaces de caminos (gentity+0x2b6) estan rotas (ver Cmd_CoopLists)
 int BrokenPathLists(int* lists)
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
-    if (!game || !g::sv_gentities) return 0;
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
+    if (!game || !g::sv_gentities || g::uo) return 0;  // UO: nodos de caminos sin ubicar
     uint8_t* nodes = *(uint8_t**)(game + 0x2dc1c0);
     int bad = 0, count = 0;
     for (int e = 0; e < g::sv_numEntities; ++e) {
@@ -506,11 +525,15 @@ void HostJoin(const sockaddr_in& from, Reader r)
         *(int*)(nc + g::NC_QPORT) = qport & 0xffff;
         *(int*)(nc + g::NC_IN) = 0;
         *(int*)(nc + g::NC_OUT) = lastIncoming + 10;  // el cgame del que entra ya vio snapshots hasta ahi
-        *(int*)(cl + 4) = 0x18000;
-        *(void**)(cl + 8) = g::Z_Malloc(0x18000);
-        *(void**)(cl + 0x10) = g::Z_Malloc(0x400);
-        *(void**)(cl + 0xc) = g::Z_Malloc(0x400);
-        *(void**)(cl + 0x14) = *(void**)(cl + 8);
+        if (g::uo) {
+            g::SV_AllocClientBuffers(cl);
+        } else {
+            *(int*)(cl + 4) = 0x18000;
+            *(void**)(cl + 8) = g::Z_Malloc(0x18000);
+            *(void**)(cl + 0x10) = g::Z_Malloc(0x400);
+            *(void**)(cl + 0xc) = g::Z_Malloc(0x400);
+            *(void**)(cl + 0x14) = *(void**)(cl + 8);
+        }
         *(int*)(cl + g::CL_RELSEQ) = *(int*)(cl + g::CL_RELACK) = *(int*)(cl + g::CL_RELSENT) = serverCmdSeq;
         *(int*)(cl + g::CL_LASTCLIENTCMD) = relSeq;
         *(int*)(cl + g::CL_GAMESTATEMSG) = *(int*)(nc + g::NC_OUT);
@@ -520,10 +543,10 @@ void HostJoin(const sockaddr_in& from, Reader r)
         // ClientConnect (gamex86 RVA 0x14800) empieza reiniciando el sistema de caminos de la IA (call 0x6fde0 en
         // RVA 0x14808): en el SP pasa una vez al cargar el mapa. Mas tarde deja a las puertas que bloquean caminos
         // apuntando a nodos liberados, y la carga de partida se cuelga en G_FreeEntity. Para los remotos se saltea.
-        uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
-        uint8_t* call = game ? game + 0x14808 : nullptr;
+        uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
+        uint8_t* call = game ? game + g::G_CONNECT_PATHINIT : nullptr;
         uint8_t saved[5] = {};
-        bool skip = call && call[0] == 0xE8 && call + 5 + *(int32_t*)(call + 1) == game + 0x6fde0;
+        bool skip = call && call[0] == 0xE8 && call + 5 + *(int32_t*)(call + 1) == game + g::G_PATHINIT;
         if (skip) {
             memcpy(saved, call, 5);
             hook::Write((uintptr_t)call, "\x0F\x1F\x44\x00\x00", 5);  // nop de 5 bytes
@@ -595,9 +618,9 @@ uint32_t DObjSig(const uint8_t* d)
     void* xanim = tree ? *(void**)tree : nullptr;
     mix(d + 0x12, 2);
     mix(d + 0x16, 1);
-    mix(d + 0x18, 0x20);
-    mix(d + 0x38, 0x10);
-    mix(d + 0x48, 8);
+    mix(d + g::DO_MODELS, 0x20);
+    mix(d + g::DO_FLAGS, 0x10);
+    mix(d + g::DO_PARENTS, 8);
     mix(&xanim, 4);
     return h ? h : 1;
 }
@@ -642,10 +665,10 @@ void SendDObjs(int n)
             uint8_t* tree = d ? *(uint8_t**)d : nullptr;
             PutStr(w, tree ? SafeStr(**(char***)tree) : "");
             for (int k = 0; k < nm; ++k) {
-                uint8_t* model = *(uint8_t**)(d + 0x18 + k * 4);
+                uint8_t* model = *(uint8_t**)(d + g::DO_MODELS + k * 4);
                 PutStr(w, model ? SafeStr(*(char**)model) : "");
-                w.Put<uint8_t>(d[0x48 + k]);
-                w.Put<uint16_t>(*(uint16_t*)(d + 0x38 + k * 2));
+                w.Put<uint8_t>(d[g::DO_PARENTS + k]);
+                w.Put<uint16_t>(*(uint16_t*)(d + g::DO_FLAGS + k * 2));
             }
             SendTo(rm->addr, w.buf, w.len);
             rm->dobjSig[e] = sig;
@@ -656,7 +679,7 @@ void SendDObjs(int n)
         int size = *(int*)(*(uint8_t**)tree + 4);
         int count = 0;
         for (int a = 0; a < size; ++a)
-            if (*(uint16_t*)(tree + 8 + a * 2)) ++count;
+            if (*(uint16_t*)(tree + g::TREE_INFO + a * 2)) ++count;
         if (aw.len + 4 + count * (2 + ANIM_STATE) > MAX_PACKET) {
             SendTo(rm->addr, aw.buf, aw.len);
             aw = Writer(M_ANIM);
@@ -664,7 +687,7 @@ void SendDObjs(int n)
         aw.Put<uint16_t>((uint16_t)e);
         aw.Put<uint16_t>((uint16_t)count);
         for (int a = 0; a < size; ++a) {
-            uint16_t idx = *(uint16_t*)(tree + 8 + a * 2);
+            uint16_t idx = *(uint16_t*)(tree + g::TREE_INFO + a * 2);
             if (!idx) continue;
             const uint8_t* info = g::xanimInfo + idx * 0x44;
             aw.Put<uint16_t>((uint16_t)a);
@@ -680,9 +703,8 @@ void FreeTreeInfos(uint8_t* tree)
 {
     int size = *(int*)(*(uint8_t**)tree + 4);
     for (int a = 0; a < size; ++a) {
-        uint16_t* slot = (uint16_t*)(tree + 8 + a * 2);
-        if (*slot) g::XAnimFreeInfo(*slot);
-        *slot = 0;
+        uint16_t* slot = (uint16_t*)(tree + g::TREE_INFO + a * 2);
+        if (*slot) ReleaseInfo(tree, slot);
     }
 }
 
@@ -752,18 +774,18 @@ void JoinerApplyDObj(Reader r)
     }
     uint8_t* d = g::ServerDObj(e);
     bool same = d && d[0x16] == nm && (*(uint8_t**)d ? **(uint8_t***)d : nullptr) == xanim;
-    for (int k = 0; same && k < nm; ++k) same = *(void**)(d + 0x18 + k * 4) == models[k].model;
+    for (int k = 0; same && k < nm; ++k) same = *(void**)(d + g::DO_MODELS + k * 4) == models[k].model;
     if (!same) {
         JoinerFreeDObj(e);
         uint8_t* tree = xanim ? g::XAnimCreateTree(xanim) : nullptr;
         S->ownTree[e] = tree;
-        g::Com_ServerDObjCreate(models, nm, tree, e, u12);
+        DObjCreate(models, nm, tree, e, u12);
         d = g::ServerDObj(e);
         if (!d) return;
     }
     for (int k = 0; k < nm; ++k) {
-        d[0x48 + k] = parents[k];
-        *(uint16_t*)(d + 0x38 + k * 2) = models[k].flags;
+        d[g::DO_PARENTS + k] = parents[k];
+        *(uint16_t*)(d + g::DO_FLAGS + k * 2) = models[k].flags;
     }
 }
 
@@ -784,7 +806,7 @@ void JoinerApplyAnims(Reader r)
             r.p += ANIM_STATE;
             if (a >= size) continue;
             seen[a] = 1;
-            uint16_t* slot = (uint16_t*)(tree + 8 + a * 2);
+            uint16_t* slot = (uint16_t*)(tree + g::TREE_INFO + a * 2);
             if (!*slot) {  // como XAnimSetGoalWeight (0x47dd90) cuando el nodo no tenia info
                 uint8_t* p = g::XAnimAllocInfo(tree, a);
                 memset(p + 0xc, 0, 0x38);
@@ -799,11 +821,8 @@ void JoinerApplyAnims(Reader r)
             memcpy(info + 0x28, st + 6, 16);
         }
         for (int a = 0; a < size; ++a) {
-            uint16_t* slot = (uint16_t*)(tree + 8 + a * 2);
-            if (*slot && !seen[a]) {
-                g::XAnimFreeInfo(*slot);
-                *slot = 0;
-            }
+            uint16_t* slot = (uint16_t*)(tree + g::TREE_INFO + a * 2);
+            if (*slot && !seen[a]) ReleaseInfo(tree, slot);
         }
     }
 }
@@ -845,11 +864,11 @@ const char* ModelName(int index) { return g::ConfigString(CS_MODELS + index) + 7
 // ver giveweapon RVA 0x15020) -> worldModel (+0x188, "xmodel/..."). "" si no tiene arma.
 const char* WeaponModelName(int n)
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
-    uint8_t** defs = game ? *(uint8_t***)(game + 0x125650) : nullptr;
-    int weapon = *(int*)(*(uint8_t**)0x152bc64 + n * *(int*)0x152bc68 + 0xa0);
-    if (!defs || weapon <= 0 || weapon >= 64 || !defs[weapon]) return "";
-    const char* name = *(const char**)(defs[weapon] + 0x188);
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
+    uint8_t** defs = game ? *(uint8_t***)(game + g::G_WEAPONDEFS) : nullptr;
+    int weapon = *(int*)(g::PlayerState(n) + g::PS_WEAPON);
+    if (!defs || weapon <= 0 || weapon >= g::MAX_WEAPONS || !defs[weapon]) return "";
+    const char* name = *(const char**)(defs[weapon] + g::WD_WORLDMODEL);
     if (!name || IsBadReadPtr(name, 8)) return "";
     name = _strnicmp(name, "xmodel/", 7) == 0 ? name + 7 : name;
     return ModelIndex(name) ? name : "";  // sin cargar no se puede poner en el cuerpo
@@ -896,7 +915,7 @@ void HostCreateBody(int n)
     }
     uint8_t* xanim = FindXAnim("generic_human.atr");
     uint8_t* tree = xanim ? g::XAnimCreateTree(xanim) : nullptr;
-    g::Com_ServerDObjCreate(models, count, tree, n, 0);
+    DObjCreate(models, count, tree, n, 0);
     S->bodyTree[n] = tree;
     Log("cuerpo %d: creado (%s + %s%s%s, arma '%s')", n, ModelName(parts[0]), ModelName(parts[1]), parts[2] ? " + " : "",
         parts[2] ? ModelName(parts[2]) : "", weapon);
@@ -909,7 +928,7 @@ bool BodyWeaponMatches(int n)
     const char* want = WeaponModelName(n);
     if (!d) return true;
     if (!want[0]) return d[0x16] == g_bodyParts[n];
-    uint8_t* model = d[0x16] == g_bodyParts[n] + 1 ? *(uint8_t**)(d + 0x18 + g_bodyParts[n] * 4) : nullptr;
+    uint8_t* model = d[0x16] == g_bodyParts[n] + 1 ? *(uint8_t**)(d + g::DO_MODELS + g_bodyParts[n] * 4) : nullptr;
     return model && !_stricmp(SafeStr(*(char**)model), want);
 }
 
@@ -954,7 +973,7 @@ void HostUpdateBodies()
 // dibuja su DObj, y sin inclinacion (los angulos son los de la vista).
 extern "C" uint8_t* CgEntityState(const int* args)
 {
-    static uint8_t copy[g::MAX_CLIENTS][g::ENTSTATE_SIZE];
+    static uint8_t copy[g::MAX_CLIENTS][g::ENTSTATE_MAX];
     int e = args[1];
     uint8_t* st = g::Entity(e);
     int self = S->role == JOINER ? S->slot : 0;
@@ -983,8 +1002,7 @@ _BodyAnimKnob:
     push dword ptr [esp+0x20]
     push dword ptr [esp+0x20]
     push dword ptr [esp+0x20]
-    mov edx, 0x47d8b0
-    call edx
+    call dword ptr [_g_addrAnimKnob]
     add esp, 24
     ret
 .globl _BodyAnimUpdate
@@ -992,8 +1010,7 @@ _BodyAnimUpdate:
     mov ecx, [esp+4]
     push 0
     push dword ptr [esp+0xc]
-    mov eax, 0x47ccd0
-    call eax
+    call dword ptr [_g_addrAnimUpdate]
     add esp, 8
     ret
 .att_syntax
@@ -1006,14 +1023,14 @@ asm(R"(
 .globl _CgSyscallHook
 _CgSyscallHook:
     mov eax, [esp+4]
-    cmp dword ptr [eax], 0xf8
+    mov ecx, [eax]
+    cmp ecx, dword ptr [_g_cgEntityTrap]
     jne 1f
     push eax
     call _CgEntityState
     add esp, 4
     ret
-1:  mov eax, 0x401a50
-    jmp eax
+1:  jmp dword ptr [_g_addrCgSyscalls]
 .att_syntax
 )");
 extern "C" void CgSyscallHook();
@@ -1021,10 +1038,10 @@ extern "C" void CgSyscallHook();
 namespace {
 
 // cgvm->systemCall (primer campo del vm_t) se rearma cada vez que el motor recrea el cgame
-constexpr uintptr_t CL_CGAME_SYSCALLS = 0x401a50;
 void HookCgame(bool on)
 {
-    void** vm = *(void***)0x14bd620;
+    const uintptr_t CL_CGAME_SYSCALLS = g_addrCgSyscalls;
+    void** vm = (void**)g::cgvm;
     if (!vm) return;
     if (on && *vm == (void*)CL_CGAME_SYSCALLS) *vm = (void*)CgSyscallHook;
     if (!on && *vm == (void*)CgSyscallHook) *vm = (void*)CL_CGAME_SYSCALLS;
@@ -1056,13 +1073,13 @@ int AnimIndex(uint8_t* xanim, const char* name)
 // Postura (ps.pm_flags: 1 cuerpo a tierra, 2 agachado), vida y velocidad del jugador -> animacion
 int ChooseBodyAnim(int n)
 {
-    uint8_t* ps = *(uint8_t**)0x152bc64 + n * *(int*)0x152bc68;
+    uint8_t* ps = g::PlayerState(n);
     const float* v = (const float*)(ps + 0x20);
     float speed = sqrtf(v[0] * v[0] + v[1] * v[1]);
     int flags = *(int*)(ps + 0xc);
     bool firing = *(int*)(g::Entity(n) + 0x10) & EF_FIRING;
     if (S->downed[n]) return BA_DOWNED;
-    if (*(int*)(ps + 0xe4) <= 0) return BA_DEATH;
+    if (*(int*)(ps + g::PS_HEALTH) <= 0) return BA_DEATH;
     if (flags & 1) return speed > 5 ? BA_CRAWL : firing ? BA_PRONEFIRE : BA_PRONE;
     if (flags & 2) return speed >= 5 ? (speed < 100 ? BA_CROUCHWALK : BA_CROUCHRUN) : firing ? BA_CROUCHFIRE : BA_CROUCH;
     if (speed < 5) return firing ? BA_FIRE : BA_IDLE;
@@ -1079,9 +1096,9 @@ int ChooseBodyAnim(int n)
 bool NewShot(int n)
 {
     static int lastClip[g::MAX_CLIENTS];
-    const int* clips = (const int*)(*(uint8_t**)0x152bc64 + n * *(int*)0x152bc68 + 0x1f4);
+    const int* clips = (const int*)(g::PlayerState(n) + g::PS_CLIP);
     int clip = 0;
-    for (int i = 0; i < 64; ++i) clip += clips[i];
+    for (int i = 0; i < g::MAX_WEAPONS; ++i) clip += clips[i];
     bool shot = clip < lastClip[n];
     lastClip[n] = clip;
     return shot;
@@ -1102,7 +1119,7 @@ void HostAnimateBodies(float dt)
         if (want != g_bodyAnim[n]) {
             // el knob solo apaga las hermanas de la hoja: se apaga todo y se enciende la cadena nueva
             for (int a = 1; a < size; ++a)
-                if (uint16_t idx = *(uint16_t*)(tree + 8 + a * 2)) {
+                if (uint16_t idx = *(uint16_t*)(tree + g::TREE_INFO + a * 2)) {
                     uint8_t* info = g::xanimInfo + idx * 0x44;
                     *(float*)(info + 0x44) = *(float*)(info + 0x48) = *(float*)(info + 0x4c) = 0;
                 }
@@ -1114,7 +1131,7 @@ void HostAnimateBodies(float dt)
         } else if ((want == BA_FIRE || want == BA_CROUCHFIRE || want == BA_PRONEFIRE) && NewShot(n)) {
             // otro tiro con el boton apretado: la animacion de disparo (sin bucle) vuelve a empezar
             int index = AnimIndex(xanim, kBodyAnimName[want]);
-            if (uint16_t idx = index > 0 ? *(uint16_t*)(tree + 8 + index * 2) : 0) {
+            if (uint16_t idx = index > 0 ? *(uint16_t*)(tree + g::TREE_INFO + index * 2) : 0) {
                 uint8_t* info = g::xanimInfo + idx * 0x44;
                 *(float*)(info + 0x38) = *(float*)(info + 0x3c) = 0;
                 *(uint16_t*)(info + 0x40) = *(uint16_t*)(info + 0x42) = 0;
@@ -1124,7 +1141,7 @@ void HostAnimateBodies(float dt)
         // 0x47ba90 deja el tiempo nuevo en +0x38 (ciclo +0x40) calculado desde el confirmado +0x3c (+0x42); el
         // servidor lo confirma despues, pero tambien solo desde la entidad 4
         for (int a = 0; a < size; ++a)
-            if (uint16_t idx = *(uint16_t*)(tree + 8 + a * 2)) {
+            if (uint16_t idx = *(uint16_t*)(tree + g::TREE_INFO + a * 2)) {
                 uint8_t* info = g::xanimInfo + idx * 0x44;
                 *(float*)(info + 0x3c) = *(float*)(info + 0x38);
                 *(uint16_t*)(info + 0x42) = *(uint16_t*)(info + 0x40);
@@ -1139,7 +1156,7 @@ void HostAnimateBodies(float dt)
 // G_Damage (gamex86 RVA 0x18800): (targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc).
 // gentity +0x104 = gclient (solo jugadores). gamex86 se recarga con el mapa: se vuelve a enganchar.
 using GDamage_t = void(__cdecl*)(uint8_t*, uint8_t*, uint8_t*, float*, float*, int, int, int, int);
-constexpr uintptr_t G_DAMAGE_RVA = 0x18800;
+const uintptr_t G_DAMAGE_RVA = g::G_DAMAGE;
 const uint8_t kGDamagePrologue[8] = {0x83, 0xEC, 0x18, 0x55, 0x8B, 0x6C, 0x24, 0x20};
 GDamage_t g_origDamage;
 uint8_t* g_damageHooked;  // base de gamex86 enganchada
@@ -1158,19 +1175,19 @@ bool CoopActive()
 }
 
 bool PlayerInGame(int n) { return g::svs_clients && *(int*)(g::Client(n) + g::CL_STATE) == 1; }
-uint8_t* PlayerState(int n) { return *(uint8_t**)0x152bc64 + n * *(int*)0x152bc68; }
+uint8_t* PlayerState(int n) { return g::PlayerState(n); }
 
 bool AnyOtherStanding(int n)
 {
     for (int m = 0; m < g::MAX_CLIENTS; ++m)
-        if (m != n && PlayerInGame(m) && !S->downed[m] && *(int*)(g::Entity(m) + 0x1d8) > 0) return true;
+        if (m != n && PlayerInGame(m) && !S->downed[m] && *(int*)(g::Entity(m) + g::GE_HEALTH) > 0) return true;
     return false;
 }
 
 void SetHealth(int n, int health)
 {
-    *(int*)(g::Entity(n) + 0x1d8) = health;
-    *(int*)(PlayerState(n) + 0xe4) = health;
+    *(int*)(g::Entity(n) + g::GE_HEALTH) = health;
+    *(int*)(PlayerState(n) + g::PS_HEALTH) = health;
 }
 
 // aviso en la consola (las ultimas lineas se ven arriba de la pantalla). Texto en Latin-1 como la fuente.
@@ -1235,7 +1252,7 @@ void SetDowned(int n, bool downed)
 {
     S->downed[n] = downed;
     S->reviveTime[n] = 0;
-    int& flags = *(int*)(g::Entity(n) + 0x134);
+    int& flags = *(int*)(g::Entity(n) + g::GE_FLAGS);
     flags = downed ? flags | FL_NOTARGET : flags & ~FL_NOTARGET;
     Log("jugador %d: %s", n, downed ? "caido" : "levantado");
     DownedMessage(n, downed, 0);
@@ -1246,8 +1263,8 @@ void __cdecl Hook_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, 
 {
     uint8_t* ff = g::Cvar_FindVar("coop_friendlyfire");
     bool friendlyFire = ff && *(int*)(ff + 0x20);
-    bool targPlayer = targ && *(void**)(targ + 0x104);
-    if (!friendlyFire && targPlayer && attacker && targ != attacker && *(void**)(attacker + 0x104)) {
+    bool targPlayer = targ && *(void**)(targ + g::GE_CLIENT);
+    if (!friendlyFire && targPlayer && attacker && targ != attacker && *(void**)(attacker + g::GE_CLIENT)) {
         Log("dano entre jugadores bloqueado: %d -> %d (%d)", *(uint16_t*)(attacker + 6), *(uint16_t*)(targ + 6), damage);
         return;  // un jugador no lastima a otro (si a si mismo, como en el SP)
     }
@@ -1260,10 +1277,10 @@ void __cdecl Hook_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, 
     // El daño final depende de la zona del golpe (G_Damage lo escala): se aplica con la vida inflada para que
     // no muera adentro, se mide cuanto bajo y recien ahi se decide entre herido, caido o muerto.
     constexpr int BOOST = 100000;
-    int health = *(int*)(targ + 0x1d8);
+    int health = *(int*)(targ + g::GE_HEALTH);
     SetHealth(n, health + BOOST);
     g_origDamage(targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc);
-    int left = *(int*)(targ + 0x1d8) - BOOST;
+    int left = *(int*)(targ + g::GE_HEALTH) - BOOST;
     if (left > 0) {
         SetHealth(n, left);
     } else if (AnyOtherStanding(n)) {
@@ -1289,7 +1306,7 @@ void Cmd_CoopKill()
 {
     int n = atoi(g::Argv(1)), damage = g::cmd_argc > 2 ? atoi(g::Argv(2)) : 100000;
     if (n < 0 || n >= g::MAX_CLIENTS || !PlayerInGame(n) || !g_origDamage) return;
-    uint8_t** currentVM = (uint8_t**)0x13f9db4;
+    uint8_t** currentVM = &g::currentVM;
     uint8_t* prevVM = *currentVM;
     int prevIn = g::inGameCall;
     *currentVM = g::gvm;
@@ -1297,7 +1314,7 @@ void Cmd_CoopKill()
     Hook_GDamage(g::Entity(n), nullptr, nullptr, nullptr, nullptr, damage, 0, 0, 0);
     *currentVM = prevVM;
     g::inGameCall = prevIn;
-    Log("coopkill %d %d -> vida %d", n, damage, *(int*)(g::Entity(n) + 0x1d8));
+    Log("coopkill %d %d -> vida %d", n, damage, *(int*)(g::Entity(n) + g::GE_HEALTH));
 }
 
 // Caido: solo puede mirar. Se filtra el usercmd que el juego lee con SV_GetUsercmd (0x449a10, EAX = cliente).
@@ -1336,11 +1353,11 @@ void Cmd_CoopUiClick()
 
 void Cmd_CoopEndLevel()
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
     if (!game || S->role != HOST || g::cmd_argc < 2) return;
-    snprintf((char*)game + 0x2dbd18, 0x400, "%s", g::Argv(1));
-    *(int*)(game + 0x2dbd08) = 1;
-    *(int*)(game + 0x2dbd00) = 1;
+    snprintf((char*)game + g::G_EXIT_MAP, 0x400, "%s", g::Argv(1));
+    *(int*)(game + g::G_EXIT_VICTORY) = 1;
+    *(int*)(game + g::G_EXIT_REQUEST) = 1;
     Log("coopendlevel %s", g::Argv(1));
 }
 
@@ -1384,7 +1401,7 @@ void HostDownedFrame(float dt)
             Log("jugador %d: %d levantandolo (%.0f s)", n, reviver, S->reviveTime[n]);
         if (S->reviveTime[n] >= REVIVE_SECONDS) {
             SetDowned(n, false);
-            SetHealth(n, *(int*)(PlayerState(n) + 0xec) / 2);
+            SetHealth(n, *(int*)(PlayerState(n) + g::PS_MAXHEALTH) / 2);
             AnnounceDowned(n, false);
         } else if (reviver >= 0) {
             reviving[reviver] = n;
@@ -1440,9 +1457,9 @@ float Dist2(const float* a, const float* b)
 void HostCatchUp(float dt)
 {
     const float* host = (const float*)(PlayerState(0) + 0x14);
-    bool hostLinked = *(uint8_t**)(g::Entity(0) + 0x294);
+    bool hostLinked = *(uint8_t**)(g::Entity(0) + g::GE_LINK);
     const float* last = g_trailCount ? g_trail[(g_trailNext - 1 + TRAIL) % TRAIL] : nullptr;
-    if (!hostLinked && *(int*)(PlayerState(0) + 0x54) != 0x7ff && (!last || Dist2(last, host) > 32 * 32)) {
+    if (!hostLinked && *(int*)(PlayerState(0) + g::PS_GROUNDENT) != 0x7ff && (!last || Dist2(last, host) > 32 * 32)) {
         memcpy(g_trail[g_trailNext], host, 12);
         g_trailNext = (g_trailNext + 1) % TRAIL;
         g_trailCount += g_trailCount < TRAIL;
@@ -1450,7 +1467,7 @@ void HostCatchUp(float dt)
     for (int n = 1; n < g::MAX_CLIENTS; ++n) {
         float* o = (float*)(PlayerState(n) + 0x14);
         bool distant = S->remote[n].active && PlayerInGame(n) && !S->downed[n] && !hostLinked &&
-                       !*(uint8_t**)(g::Entity(n) + 0x294) && Dist2(o, host) > CATCHUP_DIST * CATCHUP_DIST;
+                       !*(uint8_t**)(g::Entity(n) + g::GE_LINK) && Dist2(o, host) > CATCHUP_DIST * CATCHUP_DIST;
         g_farTime[n] = distant ? g_farTime[n] + dt : 0;
         if (g_farTime[n] < CATCHUP_SECONDS) continue;
         // el punto mas nuevo del rastro que no quede encima del host ni de otro jugador
@@ -1467,7 +1484,7 @@ void HostCatchUp(float dt)
             spot[1], spot[2]);
         memcpy(o, spot, 12);
         memset(PlayerState(n) + 0x20, 0, 12);  // velocidad
-        memcpy(g::Entity(n) + 0xe0, spot, 12);  // r.currentOrigin
+        memcpy(g::Entity(n) + g::GE_ORIGIN, spot, 12);  // r.currentOrigin
         g_farTime[n] = 0;
         SendBanner(n, "^3You fell behind: moved next to the host", false);
     }
@@ -1478,11 +1495,11 @@ uint8_t* g_weaponTried[g::MAX_CLIENTS];
 
 void HostVehicles()
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
     if (!game || !CoopActive()) return;
-    uint8_t* hostLink = *(uint8_t**)(g::Entity(0) + 0x294);
+    uint8_t* hostLink = *(uint8_t**)(g::Entity(0) + g::GE_LINK);
     uint8_t* parent = hostLink ? *(uint8_t**)hostLink : nullptr;
-    uint8_t** currentVM = (uint8_t**)0x13f9db4;  // como un frame del juego (los traps usan la VM actual)
+    uint8_t** currentVM = &g::currentVM;  // como un frame del juego (los traps usan la VM actual)
     uint8_t* prevVM = *currentVM;
     int prevIn = g::inGameCall;
     *currentVM = g::gvm;
@@ -1490,12 +1507,12 @@ void HostVehicles()
     for (int n = 1; n < g::MAX_CLIENTS; ++n) {
         if (!S->remote[n].active || !PlayerInGame(n)) continue;
         uint8_t* ent = g::Entity(n);
-        uint8_t* link = *(uint8_t**)(ent + 0x294);
+        uint8_t* link = *(uint8_t**)(ent + g::GE_LINK);
         // pasajero con las manos vacias (tanques: el host no tiene arma de infanteria): un arma del nivel
-        int& held = *(int*)(PlayerState(n) + 0xa0);
+        int& held = *(int*)(PlayerState(n) + g::PS_WEAPON);
         if (parent && (!held || VehicleWeapon(held)) && g_weaponTried[n] != parent) {
             if (held) {  // el cañón copiado del host antes de este arreglo: fuera de la mano y de la lista
-                *(uint32_t*)(PlayerState(n) + 0x2f4 + held / 32 * 4) &= ~(1u << (held % 32));
+                *(uint32_t*)(PlayerState(n) + g::PS_WEAPONS + held / 32 * 4) &= ~(1u << (held % 32));
                 held = 0;
             }
             g_weaponTried[n] = parent;
@@ -1504,7 +1521,7 @@ void HostVehicles()
         }
         if ((link ? *(uint8_t**)link : nullptr) == parent) continue;
         if (link) {
-            EntUnlink(game + 0x44d70, ent);
+            EntUnlink(game + g::G_ENTUNLINK, ent);
             Log("jugador %d: se baja del vehiculo", n);
         }
         if (!parent || g_linkFailed[n] == parent) continue;
@@ -1517,12 +1534,12 @@ void HostVehicles()
         o[1] = h[1] + sinf(yaw) * kForward[n] - cosf(yaw) * kSide[n];
         o[2] = h[2];
         memset(PlayerState(n) + 0x20, 0, 12);  // velocidad
-        memcpy(ent + 0xe0, o, 12);              // r.currentOrigin: de ahi sale el offset
-        memcpy(*(uint8_t**)(ent + 0x104) + 0x74c8, *(uint8_t**)(g::Entity(0) + 0x104) + 0x74c8, 12);
+        memcpy(ent + g::GE_ORIGIN, o, 12);      // r.currentOrigin: de ahi sale el offset
+        memcpy(*(uint8_t**)(ent + g::GE_CLIENT) + g::GC_LINKANGLES, *(uint8_t**)(g::Entity(0) + g::GE_CLIENT) + g::GC_LINKANGLES, 12);
         uint16_t tagName = *(uint16_t*)(hostLink + 8);
         const char* tag = tagName ? (const char*)(g::sl_pool + tagName * 8 + 4) : "";
-        if (EntLinkTo(game + 0x44b90, ent, parent, tag)) {
-            ((void(__cdecl*)(uint8_t*, int))(game + 0x45280))(ent, 0);
+        if (EntLinkTo(game + g::G_ENTLINKTO, ent, parent, tag)) {
+            ((void(__cdecl*)(uint8_t*, int))(game + g::G_SETLINKOFFSET))(ent, 0);
             Log("jugador %d: sube al vehiculo del host (entidad %d, tag '%s')", n, *(uint16_t*)(parent + 6), tag);
         } else {
             g_linkFailed[n] = parent;  // no reintentar con el mismo padre en cada frame
@@ -1571,11 +1588,13 @@ extern "C" void Hook_CLGetUserCmd();
 extern "C" void* g_clGetUserCmdTramp;
 void* g_clGetUserCmdTramp;
 namespace {
-constexpr uintptr_t SV_GET_USERCMD = 0x449a10;
+const uintptr_t SV_GET_USERCMD = g::A(0x449a10, 0x44bbe0);
 const uint8_t kGetUsercmdPrologue[6] = {0x56, 0x8B, 0xF0, 0x85, 0xF6, 0x57};
 
-constexpr uintptr_t CL_GET_USERCMD = 0x401050;
-const uint8_t kCLGetUserCmdPrologue[8] = {0x56, 0x8B, 0xF0, 0xA1, 0x18, 0xFE, 0x42, 0x01};
+const uintptr_t CL_GET_USERCMD = g::A(0x401050, 0x4011a0);
+const uint8_t kCLGetUserCmdPrologueCoD1[8] = {0x56, 0x8B, 0xF0, 0xA1, 0x18, 0xFE, 0x42, 0x01},
+              kCLGetUserCmdPrologueUO[8] = {0x56, 0x8B, 0xF0, 0xA1, 0x80, 0x7E, 0x83, 0x04};
+const uint8_t* const kCLGetUserCmdPrologue = g::uo ? kCLGetUserCmdPrologueUO : kCLGetUserCmdPrologueCoD1;
 
 // engancha (o restaura) una funcion del exe; el detour vive en esta DLL
 void HookExe(bool on, uintptr_t addr, const uint8_t* prologue, int len, void* detour, void*& tramp, const char* name)
@@ -1594,13 +1613,13 @@ void HookUsercmd(bool on)
     if (S->role == HOST || !on)
         HookExe(on, SV_GET_USERCMD, kGetUsercmdPrologue, sizeof kGetUsercmdPrologue, (void*)Hook_GetUsercmd,
                 g_getUsercmdTramp, "SV_GetUsercmd");
-    HookExe(on, CL_GET_USERCMD, kCLGetUserCmdPrologue, sizeof kCLGetUserCmdPrologue, (void*)Hook_CLGetUserCmd,
+    HookExe(on, CL_GET_USERCMD, kCLGetUserCmdPrologue, 8, (void*)Hook_CLGetUserCmd,
             g_clGetUserCmdTramp, "CL_GetUserCmd");
 }
 
 void HookDamage(bool on)
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
     if (on && game && game != g_damageHooked) {
         uint8_t* fn = game + G_DAMAGE_RVA;
         if (memcmp(fn, kGDamagePrologue, sizeof kGDamagePrologue) != 0) {
@@ -1623,25 +1642,25 @@ void HookDamage(bool on)
 // podia mover. ClientThink (gamex86 RVA 0x12600: mov ecx, trace) le da a Pmove el trace del juego (RVA 0x42b00);
 // lo cambiamos por este, que deja a los demas jugadores sin contents (gentity+0xc4, ver SV_LinkEntity 0x44db30)
 // mientras dura el trace. Las balas y la IA usan otros traces: siguen pegando y chocando con los jugadores.
-constexpr uint32_t PMOVE_TRACE_IMM = 0x12601, GAME_TRACE_RVA = 0x42b00;
+const uint32_t PMOVE_TRACE_IMM = g::G_PMOVE_TRACE_IMM, GAME_TRACE_RVA = g::G_TRACE;
 uint8_t* g_gameBase;
 void __cdecl PlayerMoveTrace(void* result, const float* start, const float* mins, const float* maxs, const float* end,
                              int passEnt, int mask)
 {
     int saved[g::MAX_CLIENTS];
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
-        int& contents = *(int*)(g::Entity(n) + 0xc4);
+        int& contents = *(int*)(g::Entity(n) + g::GE_CONTENTS);
         saved[n] = contents;
         if (n != passEnt) contents = 0;
     }
     ((void(__cdecl*)(void*, const float*, const float*, const float*, const float*, int, int))(g_gameBase + GAME_TRACE_RVA))(
         result, start, mins, maxs, end, passEnt, mask);
-    for (int n = 0; n < g::MAX_CLIENTS; ++n) *(int*)(g::Entity(n) + 0xc4) = saved[n];
+    for (int n = 0; n < g::MAX_CLIENTS; ++n) *(int*)(g::Entity(n) + g::GE_CONTENTS) = saved[n];
 }
 
 void HookPlayerTrace(bool on)
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
     if (!game || game[PMOVE_TRACE_IMM - 1] != 0xB9) return;  // mov ecx, imm32
     uintptr_t orig = (uintptr_t)(game + GAME_TRACE_RVA), want = on ? (uintptr_t)PlayerMoveTrace : orig;
     uintptr_t now = *(uintptr_t*)(game + PMOVE_TRACE_IMM);
@@ -1673,7 +1692,7 @@ bool PregameOpen()
 
 void SkipUiPauseCheck(bool skip)
 {
-    uint8_t* jnz = (uint8_t*)0x44d0a6;
+    uint8_t* jnz = (uint8_t*)g::A(0x44d0a6, 0x44f3b6);
     uint8_t want = skip ? 0xEB : 0x75;  // JMP / JNZ original
     if (*jnz != want && (*jnz == 0xEB || *jnz == 0x75)) hook::Write((uintptr_t)jnz, &want, 1);
 }
@@ -1682,8 +1701,8 @@ void SkipUiPauseCheck(bool skip)
 // victoria). gamex86: +0x2dbd00 pedido de salida, +0x298cac tipo de salida, +0x2dbd18 mapa siguiente.
 bool LevelExiting()
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
-    return game && (*(int*)(game + 0x298cac) || *(int*)(game + 0x2dbd00));
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
+    return game && (*(int*)(game + g::G_EXIT_TYPE) || *(int*)(game + g::G_EXIT_REQUEST));
 }
 
 // Host: con remotos conectados el menu no pausa (como en multijugador). La pantalla de inicio tras cargar y la de
@@ -1812,7 +1831,7 @@ void HostCheckReload()
 
 // SV_SpawnServer(mapa, x) (0x44c1b0; unico llamador SV_Map_f en 0x448246): fin de nivel (spmap), map/devmap en la
 // consola. Antes de que arranque el servidor nuevo, los remotos se sueltan y se les dice que mapa cargar.
-constexpr uintptr_t SPAWN_SERVER = 0x44c1b0, SPAWN_SERVER_CALL = 0x448246;
+const uintptr_t SPAWN_SERVER = g::A(0x44c1b0, 0x44e3f0), SPAWN_SERVER_CALL = g::A(0x448246, 0x44a439);
 
 void __cdecl Hook_SpawnServer(const char* map, int x)
 {
@@ -2129,7 +2148,7 @@ void Cmd_CoopJoin()
     const char* target = g::cmd_argc > 1 ? g::Argv(1) : g::CvarString("coop_ip");
     if (!*target) {
         g::Com_Printf("usage: coopjoin <ip>[:port]\n");
-        CoopStatus("Type the hosts IP.");
+        CoopStatus("Type the host's IP.");
         return;
     }
     char host[128];
@@ -2247,8 +2266,8 @@ void PollCmdFile()
 
 void Cmd_CoopInfo()
 {
-    uint8_t* gameClients = *(uint8_t**)0x152bc64;
-    int gameClientSize = *(int*)0x152bc68;
+    uint8_t* gameClients = g::sv_gameClients;
+    int gameClientSize = g::sv_gameClientSize;
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
         if (!g::svs_clients || !gameClients) break;
         const float* o = (const float*)(gameClients + n * gameClientSize + 0x14);  // ps.origin
@@ -2274,8 +2293,8 @@ void Cmd_CoopInfo()
 void Cmd_CoopBring()
 {
     int n = atoi(g::Argv(1));
-    uint8_t* gameClients = *(uint8_t**)0x152bc64;
-    int size = *(int*)0x152bc68;
+    uint8_t* gameClients = g::sv_gameClients;
+    int size = g::sv_gameClientSize;
     if (n < 1 || n >= g::MAX_CLIENTS || !gameClients) return;
     float* dst = (float*)(gameClients + n * size + 0x14);
     const float* src = (const float*)(gameClients + 0x14);
@@ -2291,18 +2310,18 @@ void Cmd_CoopBring()
 // Lista los DObj del servidor: modelos, arbol de animacion y nodos activos (para el tramo 2).
 void Cmd_CoopDObj()
 {
-    const int16_t* serverObjMap = (const int16_t*)0x886f10;
+    const int16_t* serverObjMap = g::serverObjMap;
     int shown = 0;
     for (int e = 0; e < g::MAX_GENTITIES && shown < 60; ++e) {
         if (!serverObjMap[e]) continue;
-        uint8_t* d = (uint8_t*)0x888020 + serverObjMap[e] * 0x58;
+        uint8_t* d = g::dobjPool + serverObjMap[e] * g::DOBJ_SIZE;
         char models[512];
         int len = 0;
         int nm = d[0x16];
         for (int i = 0; i < nm && i < 8; ++i) {
-            uint8_t* m = *(uint8_t**)(d + 0x18 + i * 4);
-            len += snprintf(models + len, sizeof models - len, " %s(p%d f%x o%d)", m ? SafeStr(*(char**)m) : "null", d[0x48 + i],
-                            *(uint16_t*)(d + 0x38 + i * 2), d[0x50 + i]);
+            uint8_t* m = *(uint8_t**)(d + g::DO_MODELS + i * 4);
+            len += snprintf(models + len, sizeof models - len, " %s(p%d f%x o%d)", m ? SafeStr(*(char**)m) : "null",
+                            d[g::DO_PARENTS + i], *(uint16_t*)(d + g::DO_FLAGS + i * 2), d[g::DO_ORDER + i]);
         }
         uint8_t* tree = *(uint8_t**)d;
         int active = 0, size = 0;
@@ -2312,14 +2331,14 @@ void Cmd_CoopDObj()
             size = *(int*)(xanim + 4);
             animName = SafeStr(*(char**)xanim);
             for (int i = 0; i < size; ++i)
-                if (*(uint16_t*)(tree + 8 + i * 2)) ++active;
+                if (*(uint16_t*)(tree + g::TREE_INFO + i * 2)) ++active;
         }
         const float* org = (const float*)(g::Entity(e) + 0xe0);  // r.currentOrigin
         Log("dobj ent %d (%.0f %.0f %.0f): modelos %d:%s arbol %p anims '%s' n=%d activos=%d u12=%d", e, org[0], org[1], org[2],
             nm, models, tree, animName, size, active, *(uint16_t*)(d + 0x12));
         // estado de cada nodo activo: cliente (tiempo, goalTime, goalWeight, weight, rate) / servidor (lo mismo)
         for (int i = 0; tree && e < g::MAX_CLIENTS && i < size; ++i) {
-            uint16_t idx = *(uint16_t*)(tree + 8 + i * 2);
+            uint16_t idx = *(uint16_t*)(tree + g::TREE_INFO + i * 2);
             if (!idx) continue;
             const float* f = (const float*)(g::xanimInfo + idx * 0x44);
             Log("  nodo %d: cli t=%.2f %.2f gt=%.2f gw=%.2f w=%.2f r=%.2f | srv t=%.2f %.2f gt=%.2f gw=%.2f w=%.2f r=%.2f", i, f[7],
@@ -2327,7 +2346,7 @@ void Cmd_CoopDObj()
         }
         ++shown;
     }
-    Log("dobj: %d infos de animacion en uso", *(int*)0xa6d000);
+    Log("dobj: %d infos de animacion en uso", *(int*)g::xanimInfo);
 }
 
 // prueba: coopgod <n> [0|1] -> el host le mantiene la vida al maximo al jugador n
@@ -2345,10 +2364,9 @@ void Cmd_CoopLook()
 {
     int n = atoi(g::Argv(1)), e = atoi(g::Argv(2));
     float dist = g::cmd_argc > 3 ? (float)atof(g::Argv(3)) : 150;
-    uint8_t* gameClients = *(uint8_t**)0x152bc64;
-    if (n < 0 || n >= g::MAX_CLIENTS || e < 0 || e >= g::MAX_GENTITIES || !gameClients) return;
-    uint8_t* ps = gameClients + n * *(int*)0x152bc68;
-    const float* t = (const float*)(g::Entity(e) + 0xe0);  // r.currentOrigin
+    if (n < 0 || n >= g::MAX_CLIENTS || e < 0 || e >= g::MAX_GENTITIES || !g::sv_gameClients) return;
+    uint8_t* ps = g::PlayerState(n);
+    const float* t = (const float*)(g::Entity(e) + g::GE_ORIGIN);  // r.currentOrigin
     float* o = (float*)(ps + 0x14);
     float dx = o[0] - t[0], dy = o[1] - t[1], len = sqrtf(dx * dx + dy * dy);
     if (len < 1) dx = -1, dy = 0, len = 1;
@@ -2357,8 +2375,8 @@ void Cmd_CoopLook()
     o[2] = t[2] + 8;
     memset(ps + 0x20, 0, 12);  // velocidad
     float yaw = atan2f(-dy, -dx) * 180.0f / 3.14159265f;
-    const int* cmdAngles = (const int*)(ps + 0x73e4 + 8);  // gclient.pers.cmd.angles
-    int* delta = (int*)(ps + 0x48);
+    const int* cmdAngles = (const int*)(ps + g::GC_CMD + 8);  // gclient.pers.cmd.angles
+    int* delta = (int*)(ps + g::PS_DELTA_ANGLES);
     float pitch = g::cmd_argc > 4 ? (float)atof(g::Argv(4)) : 0;  // positivo = hacia abajo
     delta[0] = ((int)(pitch * 65536 / 360) & 0xffff) - cmdAngles[0];
     delta[1] = ((int)(yaw * 65536 / 360) & 0xffff) - cmdAngles[1];
@@ -2371,7 +2389,7 @@ void Cmd_CoopState()
     int e = atoi(g::Argv(1));
     if (e < 0 || e >= g::MAX_GENTITIES || !g::sv_gentities) return;
     const uint8_t* st = g::Entity(e);
-    const float* org = (const float*)(st + 0xe0);
+    const float* org = (const float*)(st + g::GE_ORIGIN);
     Log("state %d (r.currentOrigin %.1f %.1f %.1f):", e, org[0], org[1], org[2]);
     for (int i = 0; i < g::ENTSTATE_SIZE; i += 16) {
         char line[256];
@@ -2381,12 +2399,12 @@ void Cmd_CoopState()
         Log("%s", line);
     }
     // centity del cgame (cg_entities 0x3012adc0, 0x178 c/u): +0 currentState, +0x138 currentValid, +0x150 lerpOrigin
-    if (uint8_t* cg = (uint8_t*)GetModuleHandleA("cgamex86.dll")) {
+    if (uint8_t* cg = g::uo ? nullptr : (uint8_t*)GetModuleHandleA("cgamex86.dll")) {  // UO: centity sin ubicar
         const uint8_t* cent = cg + 0x12adc0 + e * 0x178;
         const float* lo = (const float*)(cent + 0x150);
         Log("cent %d: eType %d eFlags %x valid %d lerpOrigin (%.1f %.1f %.1f) lerpAngles (%.1f %.1f %.1f) dobjCliente %d", e,
             cent[0], *(const int*)(cent + 0x10), *(const int*)(cent + 0x138), lo[0], lo[1], lo[2], lo[3], lo[4], lo[5],
-            ((const int16_t*)0x89fc88)[e]);
+            g::clientObjMap[e]);
     }
 }
 
@@ -2417,8 +2435,8 @@ void Cmd_CoopEnt()
 // rota, G_FreeEntity (al cargar partida) da vueltas para siempre.
 void Cmd_CoopLists()
 {
-    uint8_t* game = (uint8_t*)GetModuleHandleA("gamex86.dll");
-    if (!game || !g::sv_gentities) return;
+    uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
+    if (!game || !g::sv_gentities || g::uo) return;  // UO: nodos de caminos sin ubicar
     uint8_t* nodes = *(uint8_t**)(game + 0x2dc1c0);
     int bad = 0, lists = 0;
     for (int e = 0; e < g::sv_numEntities; ++e) {
@@ -2595,7 +2613,7 @@ EXPORT void __cdecl Coop_HostFrame()
     HookPlayerTrace(true);
     PlayersNotSolidForPrediction();
     static int lastTime;
-    int now = *(int*)0x152e930;  // sv.time
+    int now = g::sv_time;
     float dt = (now - lastTime) / 1000.0f;
     lastTime = now;
     if (dt < 0 || dt > 0.2f) dt = 0;
@@ -2613,12 +2631,11 @@ EXPORT void __cdecl Coop_HostFrame()
         teamPos[n][2] = *(float*)(g::Entity(n) + 0x48);  // apos.trBase yaw
     }
     if (CoopActive()) DrawTeamOnCompass(team, teamPos, 0);
-    uint8_t* gameClients = *(uint8_t**)0x152bc64;
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
-        if (!S->god[n] || !gameClients || *(int*)(g::Client(n) + g::CL_STATE) != 1) continue;
-        uint8_t* ps = gameClients + n * *(int*)0x152bc68;
-        *(int*)(ps + 0xe4) = *(int*)(ps + 0xec);                // ps.stats vida = maxima
-        *(int*)(g::Entity(n) + 0x1d8) = *(int*)(ps + 0xec);     // ent->health (ver ClientSpawn)
+        if (!S->god[n] || !g::sv_gameClients || *(int*)(g::Client(n) + g::CL_STATE) != 1) continue;
+        uint8_t* ps = g::PlayerState(n);
+        *(int*)(ps + g::PS_HEALTH) = *(int*)(ps + g::PS_MAXHEALTH);              // ps.stats vida = maxima
+        *(int*)(g::Entity(n) + g::GE_HEALTH) = *(int*)(ps + g::PS_MAXHEALTH);    // ent->health (ver ClientSpawn)
     }
     for (int n = 1; n < g::MAX_CLIENTS; ++n) {
         if (!S->remote[n].active) continue;
@@ -2653,13 +2670,13 @@ EXPORT int __cdecl Coop_FrozenFrame(int msec)
     if (!S->frozen) return 0;  // se perdio el host
     DrawTeamOnCompass(g_team, g_teamPos, S->slot);
     int& t = S->frozenTime;
-    int latest = *(int*)0x1426e68;  // cl.snap.serverTime
+    int latest = g::cl_snapServerTime;
     int target = latest - 50;
     t += msec;
     if (t < target - 300) t = target;  // al entrar o tras un corte: salto
     else if (t > latest) t = latest;   // nunca adelante del ultimo snapshot
     else if (t < target - 10) t += 1;  // se acerca de a poco
-    *(int*)0x152e930 = t;               // sv.time
+    g::sv_time = t;
     g::Com_SyncClientDObjs();           // lo hace un trap del juego, que aca no corre
     return 1;
 }

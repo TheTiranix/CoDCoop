@@ -7,23 +7,24 @@
 #   .\run.ps1 kill               cierra solo los juegos de D:\CoDCoop
 param([string]$What, [string]$A1 = 'pathfinder', [string]$A2)
 $game = 'D:\CoDCoop\game'
+$exe = if ($env:COOP_UO) { 'CoDUOSP.exe' } else { 'CoDSP.exe' }  # COOP_UO=1: United Offensive
 switch ($What) {
   'host' {
-    Remove-Item "$game\__CoDSP" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$game\__CoDSP","$game\__CoDUOSP" -Force -ErrorAction SilentlyContinue
     Get-ChildItem $game -Filter 'codcoop*.log' | Remove-Item -Force -ErrorAction SilentlyContinue
     $args = "+set r_fullscreen 0 +set r_mode 3 +set com_introplayed 1 +set logfile 2 +set sv_cheats 1 +devmap $A1 +coophost"
-    (Start-Process "$game\CoDSP.exe" -WorkingDirectory $game -ArgumentList $args -PassThru).Id
+    (Start-Process "$game\$exe" -WorkingDirectory $game -ArgumentList $args -PassThru).Id
   }
   'join' {
-    Remove-Item "$game\__CoDSP" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$game\__CoDSP","$game\__CoDUOSP" -Force -ErrorAction SilentlyContinue
     $args = "+set fs_homepath D:\CoDCoop\run\join +set r_fullscreen 0 +set r_mode 3 +set com_introplayed 1 +set logfile 2 +set sv_cheats 1 +devmap $A1 +coopjoin 127.0.0.1"
-    (Start-Process "$game\CoDSP.exe" -WorkingDirectory $game -ArgumentList $args -PassThru).Id
+    (Start-Process "$game\$exe" -WorkingDirectory $game -ArgumentList $args -PassThru).Id
   }
   'joinmenu' {  # el que se une queda en el menu principal; despues: cmd join "coopjoin 127.0.0.1"
     # (+coopjoin sin ip solo muestra el uso, pero hace que use codcoop_join.log/.cmd)
-    Remove-Item "$game\__CoDSP" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$game\__CoDSP","$game\__CoDUOSP" -Force -ErrorAction SilentlyContinue
     $args = "+set fs_homepath D:\CoDCoop\run\join +set r_fullscreen 0 +set r_mode 3 +set com_introplayed 1 +set logfile 2 +set sv_cheats 1 +coopjoin"
-    (Start-Process "$game\CoDSP.exe" -WorkingDirectory $game -ArgumentList $args -PassThru).Id
+    (Start-Process "$game\$exe" -WorkingDirectory $game -ArgumentList $args -PassThru).Id
   }
   'cmd' {
     $f = if ($A1 -eq 'join') { "$game\codcoop_join.cmd" } else { "$game\codcoop.cmd" }
@@ -43,7 +44,7 @@ switch ($What) {
     Add-Type 'using System; using System.Runtime.InteropServices; public static class J { [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f); [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out R r); [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); public struct R { public int L, T, Rt, B; } }'
     Add-Type -AssemblyName System.Drawing
     [J]::SetProcessDPIAware() | Out-Null  # GetWindowRect y CopyFromScreen en pixeles reales
-    $p = @(Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Sort-Object StartTime)[-1]
+    $p = @(Get-Process CoDSP,CoDUOSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Sort-Object StartTime)[-1]
     [J]::SetWindowPos($p.MainWindowHandle, [IntPtr](-1), 0, 0, 0, 0, 0x13) | Out-Null; Start-Sleep -Milliseconds 400
     $r = New-Object J+R; [J]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
     $bmp = New-Object System.Drawing.Bitmap ($r.Rt - $r.L), ($r.B - $r.T)
@@ -56,7 +57,7 @@ switch ($What) {
     Add-Type 'using System; using System.Runtime.InteropServices; public static class M { [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }'
     $x = if ($PSBoundParameters.ContainsKey('A1')) { [int]$A1 } else { 200 }
     $y = if ($A2) { [int]$A2 } else { 200 }
-    foreach ($p in Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' }) {
+    foreach ($p in Get-Process CoDSP,CoDUOSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' }) {
       $l = [IntPtr]($x -bor ($y -shl 16))
       [M]::PostMessage($p.MainWindowHandle, 0x201, [IntPtr]1, $l) | Out-Null; Start-Sleep -Milliseconds 80
       [M]::PostMessage($p.MainWindowHandle, 0x202, [IntPtr]0, $l) | Out-Null
@@ -64,7 +65,7 @@ switch ($What) {
   }
   'layout' {  # host a la izquierda, el que se une a la derecha; con "join" solo el que se une, entero a la izquierda
     Add-Type 'using System; using System.Runtime.InteropServices; public static class P { [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f); }'
-    $ps = @(Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Sort-Object StartTime)
+    $ps = @(Get-Process CoDSP,CoDUOSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Sort-Object StartTime)
     if ($A1 -eq 'join' -and $ps.Count -ge 2) { $ps = @($ps[1]) }
     $x = 0
     foreach ($p in $ps) { [P]::SetWindowPos($p.MainWindowHandle, [IntPtr](-1), $x, 0, 0, 0, 0x11) | Out-Null; $x += 650 }
@@ -72,11 +73,11 @@ switch ($What) {
   }
   'unlayout' {
     Add-Type 'using System; using System.Runtime.InteropServices; public static class P { [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f); }'
-    foreach ($p in Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' }) { [P]::SetWindowPos($p.MainWindowHandle, [IntPtr](-2), 0, 0, 0, 0, 0x13) | Out-Null }
+    foreach ($p in Get-Process CoDSP,CoDUOSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' }) { [P]::SetWindowPos($p.MainWindowHandle, [IntPtr](-2), 0, 0, 0, 0, 0x13) | Out-Null }
   }
   'kill' {
-    Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Stop-Process -Force
+    Get-Process CoDSP,CoDUOSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Stop-Process -Force
     Start-Sleep 1
-    Remove-Item "$game\__CoDSP" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$game\__CoDSP","$game\__CoDUOSP" -Force -ErrorAction SilentlyContinue
   }
 }

@@ -1,0 +1,100 @@
+commandTime                      0x0     0x0
+pm_type                          0x4     0x4
+bobCycle                         0x8     0x8
+pm_flags                         0xc     0xc
+pm_time                         0x10    0x10
+origin[0]                       0x14    0x14
+origin[1]                       0x18    0x18
+origin[2]                       0x1c    0x1c
+velocity[0]                     0x20    0x20
+velocity[1]                     0x24    0x24
+velocity[2]                     0x28    0x28
+weaponTime                      0x2c    0x2c
+weaponDelay                     0x30    0x30
+grenadeTimeLeft                 0x34    0x34
+iFoliageSoundTime               0x38    0x38
+gravity                         0x3c    0x40  *
+leanf                           0x40    0x44  *
+speed                           0x44    0x48  *
+delta_angles[0]                 0x48    0x4c  *
+delta_angles[1]                 0x4c    0x50  *
+delta_angles[2]                 0x50    0x54  *
+groundEntityNum                 0x54    0x58  *
+vLadderVec[0]                   0x58    0x5c  *
+vLadderVec[1]                   0x5c    0x60  *
+vLadderVec[2]                   0x60    0x64  *
+jumpTime                        0x64    0x68  *
+fJumpPeak                       0x68    -0x1  *
+movementDir                     0x6c    0x70  *
+eFlags                          0x70    0x74  *
+eventSequence                   0x74    0x78  *
+events[0]                       0x78    0x7c  *
+events[1]                       0x7c    0x80  *
+events[2]                       0x80    0x84  *
+events[3]                       0x84    0x88  *
+eventParms[0]                   0x88    0x8c  *
+eventParms[1]                   0x8c    0x90  *
+eventParms[2]                   0x90    0x94  *
+eventParms[3]                   0x94    0x98  *
+clientNum                       0x9c    0xc4  *
+weapon                          0xa0    0xc8  *
+weaponstate                     0xa4    0xcc  *
+fWeaponPosFrac                  0xa8    0xd0  *
+viewmodelIndex                  0xac    0xd4  *
+viewangles[0]                   0xb0    0xd8  *
+viewangles[1]                   0xb4    0xdc  *
+viewangles[2]                   0xb8    0xe0  *
+viewHeightTarget                0xbc    0xe4  *
+viewHeightCurrent               0xc0    0xe8  *
+viewHeightLerpTime              0xc4    0xec  *
+viewHeightLerpTarget            0xc8    0xf0  *
+viewHeightLerpDown              0xcc    0xf4  *
+viewHeightLerpPosAdj            0xd0    0xf8  *
+damageEvent                     0xd4    0xfc  *
+damageYaw                       0xd8   0x100  *
+damagePitch                     0xdc   0x104  *
+damageCount                     0xe0   0x108  *
+weapons[0]                     0x2f4   0x51c  *
+weapons[1]                     0x2f8   0x520  *
+weaponslots[0]                 0x2fc   0x52c  *
+weaponslots[4]                 0x300   0x530  *
+weaponrechamber[0]             0x304   0x534  *
+weaponrechamber[1]             0x308   0x538  *
+mins[0]                        0x30c   0x544  *
+mins[1]                        0x310   0x548  *
+mins[2]                        0x314   0x54c  *
+maxs[0]                        0x318   0x550  *
+maxs[1]                        0x31c   0x554  *
+maxs[2]                        0x320   0x558  *
+proneViewHeight                0x324   0x55c  *
+crouchViewHeight               0x328   0x560  *
+standViewHeight                0x32c   0x564  *
+deadViewHeight                 0x330   0x568  *
+walkSpeedScale                 0x334   0x56c  *
+runSpeedScale                  0x338   0x570  *
+proneSpeedScale                0x33c   0x578  *
+crouchSpeedScale               0x340   0x57c  *
+strafeSpeedScale               0x344   0x580  *
+backSpeedScale                 0x348   0x584  *
+leanSpeedScale                 0x34c   0x588  *
+proneDirection                 0x350   0x58c  *
+proneDirectionPitch            0x354   0x590  *
+proneTorsoPitch                0x358   0x594  *
+viewlocked                     0x35c   0x5a0  *
+viewlocked_entNum              0x360   0x5a4  *
+linkAngles[0]                  0x364   0x5a8  *
+linkAngles[1]                  0x368   0x5ac  *
+linkAngles[2]                  0x36c   0x5b0  *
+friction                       0x370   0x5b4  *
+gunfx                          0x374    -0x1  *
+serverCursorHint               0x378   0x5b8  *
+serverCursorHintVal            0x37c   0x5bc  *
+serverCursorHintString         0x380   0x5c0  *
+iCompassFriendInfo             0x3b4   0x5f4  *
+iCompassTankInfo               0x3b8   0x5f8  *
+weapAnim                       0x3cc   0x614  *
+aimSpreadScale                 0x3d0   0x618  *
+shellshockIndex                0x3d4   0x61c  *
+shellshockTime                 0x3d8   0x620  *
+shellshockDuration             0x3dc   0x624  *
+solo en el nuevo: iFatigueSoundTime=0x3c, fJumpOriginZ=0x6c, gameEventSequence=0xa0, gameEvents[0]=0xa4, gameEvents[1]=0xa8, gameEvents[2]=0xac, gameEvents[3]=0xb0, gameEventParms[0]=0xb4, gameEventParms[1]=0xb8, gameEventParms[2]=0xbc, gameEventParms[3]=0xc0, weapons[2]=0x524, weapons[3]=0x528, weaponrechamber[2]=0x53c, weaponrechamber[3]=0x540, sprintSpeedScale=0x574, fatigueScale=0x598, vehPos=0x608, vehType=0x60c
