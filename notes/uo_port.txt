@@ -1,0 +1,145 @@
+## exe
+    0x401050 code=0x4011a0     refs: -
+    0x401a50 code=?            refs: 0x401b80*1
+    0x40b3e0 code=0x40c2b0     refs: 0x40c2b0*1
+    0x40de40 code=?            refs: -
+    0x40df80 code=0x40f120     refs: 0x40f120*1
+    0x40fae0 code=0x410cb0     refs: -
+    0x4103e0 code=0x4115c0     refs: -
+    0x4209d0 code=0x421ed0     refs: 0x421ed0*14 0x430a10*2 0x510f50*1
+    0x420d40 code=0x422220     refs: 0x422220*1
+    0x4213d0 code=0x422860     refs: 0x422860*22
+    0x42a480 code=0x42b8e0     refs: 0x42b8e0*10 0x527c3a*3
+    0x42e300 code=?            refs: 0x42ffb0*38 0x4dcf70*1 0x461950*1
+    0x431030 code=?            refs: 0x432e60*1
+    0x4310f0 code=0x432f20     refs: 0x432f20*1
+    0x431150 code=0x432f80     refs: 0x432f80*1
+    0x431380 code=?            refs: 0x433170*1
+    0x431400 code=?            refs: 0x4331f0*1
+    0x431440 code=?            refs: 0x433230*1
+    0x431920 code=0x433700     refs: 0x433700*27
+    0x431cf0 code=?            refs: 0x433a60*16 0x4aff30*5 0x451570*2
+    0x43f1c0 code=0x441050     refs: 0x527180*1  DISTINTO
+    0x43f290 code=0x441120     refs: 0x42ffb0*1  DISTINTO
+    0x448246 code=?            refs: -
+    0x448d70 code=?            refs: -
+    0x448e40 code=0x44b010     refs: -
+    0x449a10 code=0x44bbe0     refs: -
+    0x449bf0 code=0x44bdc0     refs: -
+    0x44b900 code=?            refs: 0x44db10*4
+    0x44c1b0 code=?            refs: -
+    0x44caf0 code=?            refs: 0x44ed80*3
+    0x44cf10 code=0x44f220     refs: -
+    0x44d0a3 code=?            refs: -
+    0x44d0a6 code=?            refs: -
+    0x44d8e0 code=0x44fb90     refs: -
+    0x44d960 code=?            refs: 0x44fc10*1
+    0x44da50 code=0x44fd00     refs: 0x44fd00*1
+    0x44db30 code=0x44fde0     refs: 0x44fde0*1
+    0x44f270 code=0x451570     refs: 0x451570*39 0x406c00*1
+    0x45b8f0 code=0x45fd50     refs: -
+    0x476e00 code=?            refs: -
+    0x477020 code=0x47b780     refs: 0x47b780*2
+    0x47a310 code=0x47ecb0     refs: 0x47ecb0*1
+    0x47b010 code=?            refs: 0x47fa80*2
+    0x47ba90 code=?            refs: 0x480530*2
+    0x47ccd0 code=0x4817c0     refs: -
+    0x47d2d0 code=?            refs: 0x481df0*1
+    0x47d8b0 code=0x4823e0     refs: 0x4823e0*1
+    0x47dd90 code=?            refs: 0x482830*5
+    0x4802f0 code=?            refs: -
+   0x13f9db4 code=?            refs: 0x37c07ac*4
+   0x13f9db8 code=?            refs: 0x37c07a4*27 0x8f71bc*1
+   0x1426e68 code=?            refs: -
+   0x1426e6c code=?            refs: 0x482e08c*5
+   0x1439260 code=?            refs: 0x4842100*36
+   0x14395bc code=?            refs: 0x484245c*9
+   0x14795c4 code=?            refs: 0x4882464*2
+   0x14795c8 code=?            refs: 0x4882468*5
+   0x14b95d0 code=?            refs: -
+   0x14bd620 code=?            refs: 0x48ca4c8*23
+   0x14bd648 code=?            refs: 0x482df44*25
+   0x14e440c code=?            refs: 0x4805ee8*8 0x4807084*1
+   0x14f4840 code=?            refs: 0x47c7ba0*6 0x4801c94*1
+   0x14f4c54 code=?            refs: 0x47c7fb4*4
+   0x152bc58 code=?            refs: 0x47fefb8*7
+   0x152bc5c code=?            refs: 0x47fefbc*5
+   0x152bc60 code=?            refs: 0x47fefc0*2
+   0x152bc64 code=?            refs: -
+   0x152bc68 code=?            refs: -
+   0x152bcd4 code=?            refs: 0x47ff034*7
+   0x152bcd8 code=?            refs: 0x47ff038*4
+   0x152e8e8 code=?            refs: 0x4801c48*6
+   0x152e930 code=?            refs: 0x4801c90*9
+    0x8838b8 code=?            refs: 0x8909f8*23
+    0x885db8 code=?            refs: 0x8933f8*40
+    0x886f10 code=?            refs: 0x894550*7
+    0x888020 code=?            refs: 0x895660*9
+    0x89fc88 code=?            refs: 0x8ae2c8*5
+    0x8d84c8 code=?            refs: 0x8f6bc0*16
+    0x8d8bf8 code=?            refs: 0x8f72f0*40
+    0xa6d000 code=?            refs: 0xa8b6f8*1
+    0xa6d008 code=?            refs: 0xa8b700*16
+    0xa8f648 code=?            refs: 0xaadd40*40
+## gamex86 (RVA)
+     0x12600 code=?            refs: -
+     0x12601 code=?            refs: -
+     0x14800 code=0x163d0      refs: 0x163d0*1
+     0x14808 code=?            refs: -
+     0x14900 code=?            refs: -
+     0x15020 code=0x16c10      refs: -
+     0x18800 code=?            refs: 0x1a940*6
+     0x1a940 code=?            refs: 0x1caf0*2
+      0xb000 code=?            refs: -
+      0xb3e0 code=?            refs: 0xc1d0*2
+     0x1e6b0 code=?            refs: 0x20bf0*1
+     0x42b00 code=?            refs: 0x46740*3
+     0x44b90 code=0x48c40      refs: 0x48c40*5
+     0x44d70 code=?            refs: 0x48e20*5
+     0x45280 code=0x49330      refs: 0x49330*3
+     0x6fde0 code=0x75270      refs: -
+    0x125650 code=?            refs: 0x151f34*18
+    0x12564c code=?            refs: 0x151f30*19
+    0x12eea0 code=?            refs: 0x30c720*4
+    0x2dbd00 code=?            refs: 0x3089e0*4
+    0x2dbd08 code=?            refs: 0x3089e8*1
+    0x2dbd18 code=?            refs: 0x3089f8*5
+    0x298cac code=?            refs: 0x2c1fec*5
+## cgamex86 (RVA)
+     0x206d0 code=0x27f70      refs: 0x27f70*1
+     0x1e8d0 code=?            refs: -
+     0x1ec30 code=0x26350      refs: 0x26350*1
+    0x10b8a8 code=?            refs: 0x259548*22
+    0x10b8ac code=?            refs: 0x25954c*5
+    0x11e0a4 code=?            refs: 0x26d9d4*40
+    0x12601c code=?            refs: 0x2767b0*1
+    0x12adc0 code=?            refs: 0x27b740*12
+## uix86 (RVA)
+    0x1bd394 code=?            refs: 0x1be418*2
+
+## a mano (tools/near.py + tools/disasm.py), verificadas mirando las instrucciones
+exe  0x40de40 CL_NetchanSetup        -> 0x40ef70
+exe  0x14b95d0 clc.netchan           -> 0x48c2470   (clc crece: rep stosd 0x100c -> 0x200c dwords)
+exe  0x448246 call SV_SpawnServer    -> 0x44a439 (destino 0x44e3f0 = SV_SpawnServer, era 0x44c1b0)
+exe  0x448d70                        -> 0x44af50 (prologo distinto: sin push ebx)
+exe  0x44d0a3 / 0x44d0a6             -> 0x44f3b3 / 0x44f3b6 (15/16 bytes iguales)
+exe  0x476e00                        -> 0x47b550
+exe  0x4802f0 XModelPrecache         -> 0x484cc0
+exe  0x152bc64 / 0x152bc68 gclients  -> 0x47fefc4 / 0x47fefc8 (por vecinos 0x152bc58.. -> 0x47fefb8..)
+exe  0x1426e68 cl.snap.serverTime    -> 0x482e088 (por vecino 0x1426e6c -> 0x482e08c)
+exe  client_t                        0xb87c -> 0x106c4 (add edi en 0x44e31d): TODOS los offsets CL_* cambian
+gamex86 0x12600 ClientThink          -> 0x140d0 (imm del trace en 0x140d1)
+gamex86 0x14900 ClientSpawn          -> 0x164d0
+gamex86 0xb000 dar arma              -> ? (llamada desde giveweapon 0x15020 -> 0x16c10)
+cgamex86 0x1e8d0 CG_BuildSolidList   -> 0x25ff0
+
+## encontrado probando (caido, cambio de mision, fallida)
+- CS_MODELS es 32 en UO (31 en CoD1): con 31 el cuerpo usaba el modelo de dibujo de al lado (texturas raras y
+  "R_GetShaderByHandle: out of range" en 0x50c0e4, skin por LOD del modelo equivocado).
+- getent("player", "classname") con varios jugadores cortaba scripts (animscripts GetPlayer, _atmosphere):
+  uo_gamex86 RVA 0x45aef "push msg; call Scr_Error" -> "jmp +0x0e" (queda el primero, el host).
+- XAnimCreateTree (0x4331f0) pide la memoria sin tipo (CoD1: tipo 5, que se suelta al cambiar de nivel): al
+  recargar, el que se une agotaba la memoria de scripts (MT_AllocIndex). Se liberan a mano: infos al recibir
+  M_RELOAD, el bloque (MT_FreeIndex 0x45fd30, ECX indice, EAX bytes) cuando ya cargo el mapa nuevo.
+- Mision fallida: el checkpoint guardado con un remoto daba "G_LoadGame: client mis-match in savegame" (igual que
+  en CoD1). Arreglado en los dos: HookLoad + HostDropGhosts (ver ARQUITECTURA.md).

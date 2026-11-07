@@ -290,14 +290,19 @@ static void __cdecl Hook_SvFrame(int msec)
 
 static void InstallHooks()
 {
-    if (!Expect(0x43f290, "\x56\x8B\xF0\xA1\x80\x07\x4F\x01", 8) || !Expect(0x43f1c0, "\x69\xC0\x0C\x20\x00\x00", 6) ||
-        !Expect(0x44da50, "\xA1\xB8\x9D\x3F\x01", 5) || !Expect(0x44cf10, "\x51\xA1\x20\xE9\x52\x01", 6))
-        return;
-    g_trampSend = hook::Inline(0x43f290, (void*)HookSendPacket, 8);
-    g_trampGetLoop = hook::Inline(0x43f1c0, (void*)HookGetLoopPacket, 6);
-    g_origSendClientMessages = (void (*)())hook::Inline(0x44da50, (void*)Hook_SendClientMessages, 5);
-    g_origSvFrame = (void (*)(int))hook::Inline(0x44cf10, (void*)Hook_SvFrame, 6);
-    Log("ganchos: send %p getloop %p sendmsgs %p svframe %p", g_trampSend, g_trampGetLoop,
+    // los mismos 4 ganchos en CoD1 y en UO (solo cambian las direcciones que llevan adentro)
+    uintptr_t send = g::A(0x43f290, 0x441120), getLoop = g::A(0x43f1c0, 0x441050), sendMsgs = g::A(0x44da50, 0x44fd00),
+              svFrame = g::A(0x44cf10, 0x44f220);
+    bool ok = g::uo ? Expect(send, "\x56\x8B\xF0\xA1\x38\x1D\x80\x04", 8) && Expect(getLoop, "\x69\xC0\x0C\x20\x00\x00", 6) &&
+                          Expect(sendMsgs, "\xA1\xA4\x07\x7C\x03", 5) && Expect(svFrame, "\x51\xA1\x80\x1C\x80\x04", 6)
+                    : Expect(send, "\x56\x8B\xF0\xA1\x80\x07\x4F\x01", 8) && Expect(getLoop, "\x69\xC0\x0C\x20\x00\x00", 6) &&
+                          Expect(sendMsgs, "\xA1\xB8\x9D\x3F\x01", 5) && Expect(svFrame, "\x51\xA1\x20\xE9\x52\x01", 6);
+    if (!ok) return;
+    g_trampSend = hook::Inline(send, (void*)HookSendPacket, 8);
+    g_trampGetLoop = hook::Inline(getLoop, (void*)HookGetLoopPacket, 6);
+    g_origSendClientMessages = (void (*)())hook::Inline(sendMsgs, (void*)Hook_SendClientMessages, 5);
+    g_origSvFrame = (void (*)(int))hook::Inline(svFrame, (void*)Hook_SvFrame, 6);
+    Log("ganchos (%s): send %p getloop %p sendmsgs %p svframe %p", g::uo ? "UO" : "CoD1", g_trampSend, g_trampGetLoop,
         (void*)g_origSendClientMessages, (void*)g_origSvFrame);
 }
 
@@ -314,7 +319,7 @@ static LONG WINAPI CrashLog(EXCEPTION_POINTERS* ep)
     for (int i = 0; i < 2048 && found < 16 && !IsBadReadPtr(sp + i, 4); ++i) {
         uint32_t v = sp[i];
         HMODULE m;
-        if ((v >= 0x401000 && v < 0x533000) ||
+        if ((v >= 0x401000 && v < g::A(0x533000, 0x53f000)) ||
             (v > 0x10000000 && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                                   (LPCSTR)(uintptr_t)v, &m) && m != GetModuleHandleA("kernel32.dll"))) {
             len += snprintf(line + len, sizeof line - len, " %08x", v);

@@ -2,7 +2,7 @@
 # traerla al frente (WM_KEYDOWN/WM_KEYUP con PostMessage). Para probar movimiento sin teclado.
 param([string]$Who = 'join', [double]$Seconds = 2, [string]$Key = 'W')
 Add-Type 'using System; using System.Runtime.InteropServices; public static class K { [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint c, uint t); }'
-$ps = @(Get-Process CoDSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Sort-Object StartTime)
+$ps = @(Get-Process CoDSP,CoDUOSP -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'D:\CoDCoop\*' } | Sort-Object StartTime)
 $p = if ($Who -eq 'host') { $ps[0] } else { $ps[-1] }
 $vk = if ($Key -eq 'ESC') { [uint32]0x1B } else { [uint32][char]$Key.ToUpper() }
 $scan = [K]::MapVirtualKey($vk, 0)

@@ -1,0 +1,2 @@
+solid                        0x186805eb 0x206805eb  *
+solo en el nuevo: 

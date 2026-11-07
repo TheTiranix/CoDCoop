@@ -131,8 +131,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                               L"\n\nIf the game is running, close it and try again.");
         return 1;
     }
+    // United Offensive (CoDUOSP.exe en la misma carpeta): usa el mismo ddraw.dll y su propio menu en uo\.
+    bool uo = Exists(dir + L"\\CoDUOSP.exe");
+    if (uo) {
+        CreateDirectoryW((dir + L"\\uo").c_str(), nullptr);
+        if (!WriteResource(6, dir + L"\\uo\\pakz_coop.pk3")) {
+            Msg(MB_ICONERROR, L"Could not write uo\\pakz_coop.pk3 to\n" + dir +
+                                  L"\n\nIf the game is running, close it and try again.");
+            return 1;
+        }
+    }
 
-    Msg(MB_ICONINFORMATION, L"Done, co-op is installed.\n\nStart Call of Duty as usual: the main menu has a \"Co-op\" "
-                            L"button.\nInstructions are in \"CoD Coop README.txt\", in the game folder.");
+    Msg(MB_ICONINFORMATION, std::wstring(L"Done, co-op is installed.\n\nStart Call of Duty as usual: the main menu has a "
+                                         L"\"Co-op\" button.\n") +
+                                (uo ? L"United Offensive has it too.\n" : L"") +
+                                L"Instructions are in \"CoD Coop README.txt\", in the game folder.");
     return 0;
 }
