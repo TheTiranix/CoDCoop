@@ -9,6 +9,8 @@ How it works
 
 What you need
 - Call of Duty 1 version 1.5 on every PC, with co-op installed on all of them.
+- United Offensive (version 1.41, same folder) works too: start CoDUOSP.exe and use
+  its Co-op menu. The compass does not show teammates there yet.
 
 Install
 - Run "Install CoD Coop.exe" and accept the game folder (the one with CoDSP.exe).
@@ -38,5 +40,5 @@ Over the internet by IP
 
 Uninstall
 - Delete from the game folder: ddraw.dll, codcoop_core.dll, steam_api.dll,
-  main\pakz_coop.pk3 and the codcoop_tmp folder. If there are .bak files
+  main\pakz_coop.pk3, uo\pakz_coop.pk3 and the codcoop_tmp folder. If there are .bak files
   (ddraw.dll.bak or steam_api.dll.bak), remove the .bak from their names.

@@ -1,6 +1,6 @@
 # Call of Duty Coop
 
-Play the **Call of Duty 1 (2003)** campaign in co-op with friends: up to 4 players, through Steam, over the internet by IP, or on a local network.
+Play the **Call of Duty 1 (2003)** campaign, and the **United Offensive** expansion, in co-op with friends: up to 4 players, through Steam, over the internet by IP, or on a local network.
 
 **[⬇ Download the installer](https://github.com/TheTiranix/CoDCoop/releases/latest)**
 
@@ -13,13 +13,15 @@ Play the **Call of Duty 1 (2003)** campaign in co-op with friends: up to 4 playe
 - **Nobody gets left behind.** Anyone who stays too far from the host for a few seconds reappears right behind them.
 - **Steam or IP.** With Steam there are no ports to open: your friends see you in the menu and join with one click.
 - **Drop in, drop out.** If someone disconnects, their slot is freed and they can join again.
-- **On screen.** Teammates show up on the compass, with messages when someone is down or being revived.
+- **On screen.** Teammates show up on the compass (not yet in United Offensive), with messages when someone is down or being revived.
+- **United Offensive too.** The same install works for the expansion if it is in the same folder: start `CoDUOSP.exe` and use its Co-op menu.
 - **Same difficulty as the game.** Friendly fire is off by default and can be turned on in the Co-op menu.
 - **No collisions between teammates.** Players can walk through each other, so nobody gets stuck when spawning together.
 
 ## Requirements
 
 - **Call of Duty 1 version 1.5** for Windows, on every PC that will play.
+- For the expansion: **United Offensive version 1.41**, installed in the same folder.
 - The mod installed on all of those PCs.
 
 ## Install
@@ -28,7 +30,7 @@ Play the **Call of Duty 1 (2003)** campaign in co-op with friends: up to 4 playe
 2. Run it and accept the game folder (the one with `CoDSP.exe`). If it can't find it, it lets you choose it.
 3. If Windows shows "Windows protected your PC", click **More info** → **Run anyway** (the installer is not signed).
 
-The installer copies `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pakz_coop.pk3` and a `CoD Coop README.txt` into the game folder. If there was already a `ddraw.dll` or `steam_api.dll` from another program, it keeps it with `.bak` added to the name.
+The installer copies `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pakz_coop.pk3` and a `CoD Coop README.txt` into the game folder, plus `uo\pakz_coop.pk3` if United Offensive is there. If there was already a `ddraw.dll` or `steam_api.dll` from another program, it keeps it with `.bak` added to the name.
 
 ## Play
 
@@ -65,7 +67,7 @@ In the same menu (also during the game, from the pause menu):
 
 ## Uninstall
 
-Delete `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pakz_coop.pk3` and the `codcoop_tmp` folder from the game folder. If there are `.bak` files (`ddraw.dll.bak`, `steam_api.dll.bak`), remove the `.bak` from their names.
+Delete `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pakz_coop.pk3`, `uo\pakz_coop.pk3` and the `codcoop_tmp` folder from the game folder. If there are `.bak` files (`ddraw.dll.bak`, `steam_api.dll.bak`), remove the `.bak` from their names.
 
 ## How it works
 
