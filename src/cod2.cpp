@@ -158,6 +158,215 @@ struct Packet {
 
 bool SameAddr(const sockaddr_in& a, const sockaddr_in& b) { return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port; }
 
+// ---------- DObj y animaciones ----------
+// El juego arma el DObj de cada entidad (G_DObjUpdate 0x4d6110) en la tabla que dibuja el cliente: 0x74a980[entidad]
+// = indice en el pool de DObj (0x74c200, 100 bytes). En el que se une su juego esta congelado, asi que el host le
+// manda la forma de cada DObj visible (indices de la tabla de modelos 0x1b15ad0, que coincide en los dos con el mismo
+// mapa, y el XAnim del arbol, que queda en la misma direccion) y el estado de cada nodo de animacion.
+// DObj: +0 arbol, +0x18 cantidad de modelos, +0x1a sin colision (bits), +0x1c modelos, +0x3c padres.
+// Arbol: +0 XAnim (+4 cantidad de nodos), +4 entidad+1, +8 u16 por nodo = indice en el pool de infos (0xa0a200, 0x28).
+// Info: +0xc..+0x27 hora, hora anterior, vueltas, tiempo de mezcla, peso objetivo, peso, velocidad.
+constexpr uintptr_t DOBJ_INDEX = 0x74a980, DOBJ_POOL = 0x74c200, G_MODELS = 0x1b15ad0, XANIM_INFOS = 0xa0a200;
+constexpr int DOBJ_SIZE = 100, INFO_SIZE = 0x28, INFO_STATE = 0xc, INFO_STATE_SIZE = 0x1c, MAX_ENTS = 1024, MAX_MODELS_PER = 8;
+constexpr uintptr_t CL_DOBJ_CREATE = 0x42f630;     // cdecl (modelos {XModel*, tag, sin colision}[], cantidad, arbol), EAX = entidad
+constexpr uintptr_t CL_DOBJ_FREE = 0x42f760;       // ECX = entidad
+constexpr uintptr_t XANIM_CREATE_TREE = 0x42f280;  // EBX = XAnim -> arbol
+constexpr uintptr_t XANIM_ALLOC_INFO = 0x478830;   // ESI = arbol, cdecl (nodo) -> info
+enum : uint8_t { M_DOBJ = 'D', M_ANIM = 'N' };
+
+uint8_t* ClientDObj(int e)
+{
+    uint16_t idx = *(uint16_t*)(DOBJ_INDEX + e * 2);
+    return idx ? (uint8_t*)DOBJ_POOL + idx * DOBJ_SIZE : nullptr;
+}
+
+int ModelIndex(void* model)
+{
+    for (int i = 1; i < 256; ++i)
+        if (((void**)G_MODELS)[i] == model) return i;
+    return -1;
+}
+
+uint32_t g_dobjSig[MAX_CLIENTS][MAX_ENTS];
+DWORD g_dobjSent[MAX_CLIENTS][MAX_ENTS];
+
+uint32_t DObjSig(const uint8_t* d)
+{
+    uint32_t h = 2166136261u;
+    auto mix = [&](const void* p, int len) {
+        for (int i = 0; i < len; ++i) h = (h ^ ((const uint8_t*)p)[i]) * 16777619u;
+    };
+    uint8_t* tree = *(uint8_t**)d;
+    void* xanim = tree ? *(void**)tree : nullptr;
+    mix(d + 0x18, 1);
+    mix(d + 0x1a, 1);
+    mix(d + 0x1c, 4 * MAX_MODELS_PER);
+    mix(d + 0x3c, MAX_MODELS_PER);
+    mix(&xanim, 4);
+    return h ? h : 1;
+}
+
+// host, despues de armar el snapshot del jugador n (lista de entidades en 0x8224a4, cantidad en 0x8224a0)
+void HostSendDObjs(int n)
+{
+    const int count = *(int*)0x8224a0;
+    const int* list = (const int*)0x8224a4;
+    DWORD now = GetTickCount();
+    static Packet dp(M_DOBJ), ap(M_ANIM);
+    dp = Packet(M_DOBJ);
+    ap = Packet(M_ANIM);
+    auto flush = [&](Packet& p, uint8_t type) {
+        if (p.len > 5) p.Send(g_remote[n].addr);
+        p = Packet(type);
+    };
+    for (int i = 0; i < count; ++i) {
+        int e = list[i];
+        if (e < 0 || e >= MAX_ENTS) continue;
+        uint8_t* d = ClientDObj(e);
+        uint32_t sig = d ? DObjSig(d) : 0;
+        if (sig != g_dobjSig[n][e] || (sig && now - g_dobjSent[n][e] > 2000)) {
+            int nm = d ? d[0x18] : 0;
+            if (nm > MAX_MODELS_PER) nm = MAX_MODELS_PER;
+            uint8_t idx[MAX_MODELS_PER];
+            bool ok = true;
+            for (int k = 0; k < nm && ok; ++k) {
+                int m = ModelIndex(*(void**)(d + 0x1c + k * 4));
+                ok = m > 0;
+                idx[k] = (uint8_t)m;
+            }
+            if (ok) {
+                if (dp.len + 64 > (int)sizeof dp.buf) flush(dp, M_DOBJ);
+                uint8_t* tree = d ? *(uint8_t**)d : nullptr;
+                uint8_t* xanim = tree ? *(uint8_t**)tree : nullptr;
+                dp.Put<uint16_t>((uint16_t)e);
+                dp.Put<uint8_t>((uint8_t)nm);
+                dp.Put<uint8_t>(d ? d[0x1a] : 0);
+                dp.Put(xanim);
+                dp.Put<int>(xanim ? *(int*)(xanim + 4) : 0);
+                dp.Put(idx, nm);
+                if (nm) dp.Put(d + 0x3c, nm);
+                g_dobjSig[n][e] = sig;
+                g_dobjSent[n][e] = now;
+            }
+        }
+        uint8_t* tree = d ? *(uint8_t**)d : nullptr;
+        if (!tree) continue;
+        int size = *(int*)(*(uint8_t**)tree + 4);
+        int used = 0;
+        for (int a = 0; a < size; ++a) used += *(uint16_t*)(tree + 8 + a * 2) != 0;
+        if (ap.len + 4 + used * (2 + INFO_STATE_SIZE) > (int)sizeof ap.buf - 64) flush(ap, M_ANIM);
+        ap.Put<uint16_t>((uint16_t)e);
+        ap.Put<uint16_t>((uint16_t)used);
+        for (int a = 0; a < size; ++a) {
+            uint16_t info = *(uint16_t*)(tree + 8 + a * 2);
+            if (!info) continue;
+            ap.Put<uint16_t>((uint16_t)a);
+            ap.Put((uint8_t*)XANIM_INFOS + info * INFO_SIZE + INFO_STATE, INFO_STATE_SIZE);
+        }
+    }
+    flush(dp, M_DOBJ);
+    flush(ap, M_ANIM);
+}
+
+void FreeClientDObj(int e)
+{
+    int ent = e;
+    asm volatile("call *%1" : "+c"(ent) : "r"(CL_DOBJ_FREE) : "eax", "edx", "memory");
+}
+
+uint8_t* CreateTree(uint8_t* xanim)
+{
+    uint8_t* tree;
+    asm volatile("call *%2" : "=a"(tree), "+b"(xanim) : "r"(XANIM_CREATE_TREE) : "ecx", "edx", "memory");
+    return tree;
+}
+
+void CreateClientDObj(int e, const void* models, int count, uint8_t* tree)
+{
+    int ent = e;
+    asm volatile("push %3\n\tpush %2\n\tpush %1\n\tcall *%4\n\tadd $12, %%esp"
+                 : "+a"(ent)
+                 : "r"(models), "r"(count), "r"(tree), "r"(CL_DOBJ_CREATE)
+                 : "ecx", "edx", "memory");
+}
+
+void JoinerApplyDObjs(const uint8_t* p, int len)
+{
+    const uint8_t* end = p + len;
+    while (p + 12 <= end) {
+        int e = *(const uint16_t*)p, nm = p[2], noCollide = p[3];
+        uint8_t* xanim = *(uint8_t* const*)(p + 4);
+        int size = *(const int*)(p + 8);
+        p += 12;
+        if (e >= MAX_ENTS || nm > MAX_MODELS_PER || p + nm * 2 > end) return;
+        const uint8_t *idx = p, *parents = p + nm;
+        p += nm * 2;
+        if (!nm) {
+            if (ClientDObj(e)) FreeClientDObj(e);
+            continue;
+        }
+        // el XAnim se usa por direccion (el mismo mapa lo carga en el mismo lugar): se comprueba antes de usarlo
+        if (xanim && (IsBadReadPtr(xanim, 8) || *(int*)(xanim + 4) != size)) {
+            static int warned;
+            if (warned++ < 5) Log("joiner: el XAnim %p del host no coincide aca (entidad %d)", (void*)xanim, e);
+            xanim = nullptr;
+        }
+        struct { void* model; const char* tag; int noCollide; } models[MAX_MODELS_PER];
+        for (int k = 0; k < nm; ++k) models[k] = {((void**)G_MODELS)[idx[k]], nullptr, (noCollide >> k) & 1};
+        uint8_t* d = ClientDObj(e);
+        bool same = d && d[0x18] == nm && (*(uint8_t**)d ? **(uint8_t***)d : nullptr) == xanim;
+        for (int k = 0; same && k < nm; ++k) same = *(void**)(d + 0x1c + k * 4) == models[k].model;
+        if (!same) {
+            if (d) FreeClientDObj(e);
+            uint8_t* tree = xanim ? CreateTree(xanim) : nullptr;
+            CreateClientDObj(e, models, nm, tree);
+            d = ClientDObj(e);
+            static int created;
+            if (created++ < 20) Log("joiner: DObj %d con %d modelos (arbol %p)", e, nm, (void*)tree);
+            if (!d) continue;
+        }
+        memcpy(d + 0x3c, parents, nm);
+    }
+}
+
+void JoinerApplyAnims(const uint8_t* p, int len)
+{
+    const uint8_t* end = p + len;
+    static uint8_t seen[4096];
+    while (p + 4 <= end) {
+        int e = *(const uint16_t*)p, count = *(const uint16_t*)(p + 2);
+        p += 4;
+        if (p + count * (2 + INFO_STATE_SIZE) > end || e >= MAX_ENTS) return;
+        uint8_t* d = ClientDObj(e);
+        uint8_t* tree = d ? *(uint8_t**)d : nullptr;
+        int size = tree ? *(int*)(*(uint8_t**)tree + 4) : 0;
+        if (size > (int)sizeof seen) size = 0;
+        memset(seen, 0, size);
+        for (int k = 0; k < count; ++k, p += 2 + INFO_STATE_SIZE) {
+            int a = *(const uint16_t*)p;
+            if (a >= size) continue;
+            seen[a] = 1;
+            uint16_t* slot = (uint16_t*)(tree + 8 + a * 2);
+            if (!*slot) {  // como XAnimSetGoalWeight (0x478f10) cuando el nodo no tenia info
+                int node = a;
+                uint8_t* t = tree;
+                uint8_t* info;
+                asm volatile("push %2\n\tcall *%3\n\tadd $4, %%esp" : "=a"(info), "+S"(t) : "r"(node), "r"(XANIM_ALLOC_INFO)
+                             : "ecx", "edx", "memory");
+                if (!info) continue;
+                memset(info + 0xc, 0, 0x1c);
+                *(uint16_t*)(info + 2) = 0xffff;
+                *(uint16_t*)info = *(uint16_t*)(info + 4) = *(uint16_t*)(info + 6) = 0;
+            }
+            memcpy((uint8_t*)XANIM_INFOS + *slot * INFO_SIZE + INFO_STATE, p + 2, INFO_STATE_SIZE);
+        }
+        for (int a = 0; a < size; ++a) {  // lo que el host ya no tiene queda sin peso
+            uint16_t info = *(uint16_t*)(tree + 8 + a * 2);
+            if (info && !seen[a]) memset((uint8_t*)XANIM_INFOS + info * INFO_SIZE + 0x1c, 0, 8);
+        }
+    }
+}
+
 // ---------- host ----------
 void HostJoin(const sockaddr_in& from)
 {
@@ -173,6 +382,7 @@ void HostJoin(const sockaddr_in& from)
         }
         g_remote[n] = {true, from};
         g_joinedAt[n] = GetTickCount();
+        memset(g_dobjSig[n], 0xff, sizeof g_dobjSig[n]);  // la primera vez va todo, incluso "sin DObj"
         *(uint8_t**)(Client(n) + CL_GENTITY) = Entity(n);
         // ClientConnect empieza con la init de caminos de la IA (call 0x516bc0), pensada para el inicio del nivel: a
         // mitad de partida deja una lista circular y el juego se cuelga (igual que en CoD1). Se saltea.
@@ -300,6 +510,7 @@ void HostSendSnapshots()
         p.Put(m.cursize);
         p.Put(data, m.cursize);
         p.Send(g_remote[n].addr);
+        HostSendDObjs(n);
         if (log) {
             const float* o = (const float*)(GClient(n) + 0x14);
             Log("host: jugador %d en %.0f %.0f %.0f, snapshot %d bytes", n + 1, o[0], o[1], o[2], m.cursize);
@@ -365,6 +576,10 @@ void Poll()
                 g_role = NONE;
             } else if (type == M_SNAP && g_joined) {
                 JoinerSnapshot(body, bodyLen);
+            } else if (type == M_DOBJ && g_joined) {
+                JoinerApplyDObjs(body, bodyLen);
+            } else if (type == M_ANIM && g_joined) {
+                JoinerApplyAnims(body, bodyLen);
             }
         }
     }
