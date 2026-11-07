@@ -799,6 +799,20 @@ void Cmd_Hurt()
     Log("coop2hurt %d %d -> vida %d", n + 1, damage, *(int*)(Entity(n) + GE_HEALTH));
 }
 
+// prueba: coop2save -> punto de control como el savegame() de los scripts (0x4f3a30): autosave/<mapa> por
+// SV_AddPendingSave (0x44a140: EDI = 1 autoguardado, EBX = archivo; descripcion, captura, 2)
+void Cmd_Save()
+{
+    static char file[64];
+    snprintf(file, sizeof file, "autosave/%s", MapName());
+    const char *desc = "", *shot = "_default";
+    int r, autosave = 1;
+    char* f = file;
+    asm volatile("push $2\n\tpush %4\n\tpush %3\n\tcall *%5\n\tadd $12, %%esp"
+                 : "=a"(r), "+D"(autosave), "+b"(f) : "r"(desc), "r"(shot), "r"((uintptr_t)0x44a140) : "ecx", "edx", "memory");
+    Log("coop2save %s -> %d", file, r);
+}
+
 // ---------- host ----------
 // El script del nivel arma solo al jugador 1 (level.player): el remoto entra con el mismo equipo que el host.
 // playerState: +0xac granada (offHandIndex), +0xb0 arma, +0xc0 modelo de la vista, +0xf8 municion de reserva[128],
@@ -1372,6 +1386,7 @@ extern "C" void __cdecl Cod2_SetupClients()
         Cmd_AddCommand("coop2host", Cmd_Host);
         Cmd_AddCommand("coop2join", Cmd_Join);
         Cmd_AddCommand("coop2hurt", Cmd_Hurt);
+        Cmd_AddCommand("coop2save", Cmd_Save);
     }
     Log("G_InitGame: %d jugadores, level.clients en %p", MAX_CLIENTS, (void*)g_clients);
 }
