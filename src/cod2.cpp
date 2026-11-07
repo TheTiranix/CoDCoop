@@ -121,6 +121,7 @@ float g_reviveTime[MAX_CLIENTS]; // host: segundos que un companero lleva levant
 
 sockaddr_in g_host;
 bool g_joined;
+DWORD g_mapLoadSince;  // joiner: cargando el mapa del host (no pide entrar hasta G_InitGame)
 int g_slot;
 DWORD g_lastJoinTry;
 
@@ -884,6 +885,8 @@ void HostJoin(const sockaddr_in& from)
     p.Send(from);
 }
 
+void ApplyRide(int n);
+
 void HostUsercmd(const sockaddr_in& from, const uint8_t* cmd, int len)
 {
     bool known = false;
@@ -905,6 +908,7 @@ void HostUsercmd(const sockaddr_in& from, const uint8_t* cmd, int len)
         memcpy(Client(n) + CL_LASTUSERCMD, cmd, USERCMD_SIZE);
         if (g_downed[n]) DownedCmd(Client(n) + CL_LASTUSERCMD);
         ClientThink(n);
+        ApplyRide(n);  // en un vehiculo: su lugar sobre el
         static DWORD lastLog;
         static int count;
         ++count;
@@ -934,6 +938,115 @@ float Dist2(const float* a, const float* b)
     return dx * dx + dy * dy + dz * dz;
 }
 
+// ---------- vehiculos ----------
+// En los viajes (camion, lancha) y en los tanques que maneja el jugador, el script engancha al jugador 1 al vehiculo
+// (gentity +0x1c8 -> tagInfo, +0 el padre). Los remotos se enganchan al mismo vehiculo como playerlinktodelta
+// (0x4eda80): G_EntLinkTo (0x4d6540: EBX = entidad; padre, tag) y 0x4d6ca0 (entidad, 0). Enganchado, el juego no les
+// aplica fisica, pero a un jugador lo pone siempre en el punto del vehiculo (0x4d6ec0, desde ClientEndFrame): su lugar
+// (atras del host, a un costado) se guarda respecto del vehiculo y se vuelve a poner despues. Cuando el host se
+// suelta, se sueltan (unlink 0x4ede30 -> G_EntUnlink 0x4d6720, EAX = entidad).
+constexpr int GE_TAGINFO = 0x1c8, GE_ANGLES = 0xe8, GC_LINKCLAMP = 0x8694, GC_LINKFLAG = 0x8698;
+constexpr uint32_t PMF_LINKVIEW = 0x10000000;
+uint8_t* g_rideParent[MAX_CLIENTS];
+float g_rideOffset[MAX_CLIENTS][3];  // adelante, derecha, arriba del vehiculo
+
+void AngleAxis(const float* angles, float* f, float* r, float* u)  // AngleVectors de Quake 3
+{
+    const float k = 3.14159265f / 180;
+    float sp = sinf(angles[0] * k), cp = cosf(angles[0] * k), sy = sinf(angles[1] * k), cy = cosf(angles[1] * k),
+          sr = sinf(angles[2] * k), cr = cosf(angles[2] * k);
+    f[0] = cp * cy, f[1] = cp * sy, f[2] = -sp;
+    r[0] = -sr * sp * cy + cr * sy, r[1] = -sr * sp * sy - cr * cy, r[2] = -sr * cp;
+    u[0] = cr * sp * cy + sr * sy, u[1] = cr * sp * sy - sr * cy, u[2] = cr * cp;
+}
+
+// pone al remoto n en su lugar sobre el vehiculo (posicion del jugador, de la entidad y del estado que se manda)
+void ApplyRide(int n)
+{
+    uint8_t* parent = g_rideParent[n];
+    if (!parent) return;
+    float f[3], r[3], u[3], pos[3];
+    AngleAxis((const float*)(parent + GE_ANGLES), f, r, u);
+    const float* o = (const float*)(parent + GE_CURRENT_ORIGIN);
+    const float* d = g_rideOffset[n];
+    for (int i = 0; i < 3; ++i) pos[i] = o[i] + f[i] * d[0] + r[i] * d[1] + u[i] * d[2];
+    memcpy(GClient(n) + PS_ORIGIN, pos, 12);
+    memset(GClient(n) + PS_VELOCITY, 0, 12);
+    memcpy(Entity(n) + GE_CURRENT_ORIGIN, pos, 12);
+    memcpy(Entity(n) + 0x20, pos, 12);  // es.pos.trBase
+}
+
+uint8_t* LinkParent(int n)
+{
+    uint8_t* ti = *(uint8_t**)(Entity(n) + GE_TAGINFO);
+    return ti ? *(uint8_t**)ti : nullptr;
+}
+
+void ClearLinkView(int n)  // lo que limpian playerlinktodelta y unlink en el gclient
+{
+    *(float*)(GClient(n) + GC_LINKCLAMP) = 0;
+    GClient(n)[GC_LINKFLAG] = 0;
+    *(uint32_t*)(GClient(n) + PS_PMFLAGS) &= ~PMF_LINKVIEW;
+}
+
+void Unlink(int n)
+{
+    uint8_t* ent = Entity(n);
+    asm volatile("call *%1" : "+a"(ent) : "r"((uintptr_t)0x4d6720) : "ecx", "edx", "memory");
+    ClearLinkView(n);
+}
+
+bool LinkTo(int n, uint8_t* parent)
+{
+    ClearLinkView(n);
+    uint8_t* ent = Entity(n);
+    int ok;
+    asm volatile("push $0\n\tpush %2\n\tcall *%3\n\tadd $8, %%esp"
+                 : "=a"(ok), "+b"(ent) : "r"(parent), "r"((uintptr_t)0x4d6540) : "ecx", "edx", "memory");
+    if (!ok) return false;
+    ((void(__cdecl*)(uint8_t*, int))0x4d6ca0)(Entity(n), 0);
+    return true;
+}
+
+void HostRides()
+{
+    uint8_t* parent = LinkParent(0);
+    for (int n = 1; n < MAX_CLIENTS; ++n) {
+        if (!g_remote[n].active || *(int*)(GClient(n) + GC_CONNECTED) != 2) {
+            g_rideParent[n] = nullptr;
+            continue;
+        }
+        uint8_t* mine = LinkParent(n);
+        if (parent && mine != parent) {
+            if (mine) Unlink(n);
+            // sobre el vehiculo, atras del host y a un costado (segun hacia donde mira el vehiculo)
+            const float* host = (const float*)(GClient(0) + PS_ORIGIN);
+            float yaw = *(float*)(parent + GE_ANGLES + 4) * 3.14159265f / 180;
+            float side = (n == 2 ? -1.0f : 1.0f) * (n == 3 ? 50.0f : 25.0f), back = -45;
+            float spot[3] = {host[0] + back * cosf(yaw) - side * sinf(yaw), host[1] + back * sinf(yaw) + side * cosf(yaw),
+                             host[2]};
+            float f[3], r[3], u[3], rel[3];
+            AngleAxis((const float*)(parent + GE_ANGLES), f, r, u);
+            for (int i = 0; i < 3; ++i) rel[i] = spot[i] - ((const float*)(parent + GE_CURRENT_ORIGIN))[i];
+            g_rideOffset[n][0] = rel[0] * f[0] + rel[1] * f[1] + rel[2] * f[2];
+            g_rideOffset[n][1] = rel[0] * r[0] + rel[1] * r[1] + rel[2] * r[2];
+            g_rideOffset[n][2] = rel[0] * u[0] + rel[1] * u[1] + rel[2] * u[2];
+            memcpy(Entity(n) + GE_CURRENT_ORIGIN, spot, 12);
+            bool ok = LinkTo(n, parent);
+            Log("jugador %d: %s al vehiculo %d", n + 1, ok ? "enganchado" : "no se pudo enganchar",
+                (int)(parent - (uint8_t*)G_ENTITIES) / GENTITY_SIZE);
+            g_rideParent[n] = ok ? parent : nullptr;
+            ApplyRide(n);
+        } else if (!parent && mine && mine == g_rideParent[n]) {
+            Unlink(n);
+            g_rideParent[n] = nullptr;
+            Log("jugador %d: se suelta del vehiculo", n + 1);
+        } else if (mine && mine == g_rideParent[n]) {
+            ApplyRide(n);
+        }
+    }
+}
+
 void HostCatchUp()
 {
     const float* host = (const float*)(GClient(0) + PS_ORIGIN);
@@ -950,7 +1063,8 @@ void HostCatchUp()
         bool fresh = now - g_joinedAt[n] < 20000;
         float dist = fresh ? 300 : CATCHUP_DIST;
         DWORD wait = fresh ? 1000 : CATCHUP_MS;
-        if (!g_remote[n].active || *(int*)(GClient(n) + GC_CONNECTED) != 2 || Dist2(o, host) < dist * dist) {
+        if (!g_remote[n].active || *(int*)(GClient(n) + GC_CONNECTED) != 2 || Dist2(o, host) < dist * dist ||
+            LinkParent(n)) {  // enganchado a un vehiculo: viaja con el
             g_farSince[n] = 0;
             continue;
         }
@@ -993,6 +1107,7 @@ void HostDropGhosts()
 void HostSendSnapshots()
 {
     HostDropGhosts();
+    HostRides();
     HostCatchUp();
     static DWORD lastLog;
     bool log = GetTickCount() - lastLog > 2000;
@@ -1087,6 +1202,7 @@ void Poll()
                 // cliente de aca no acepta snapshots mas viejos que los que ya mostro: se carga el mapa del host y,
                 // al terminar (G_InitGame), Cod2_Snapshot vuelve a pedir entrar.
                 g_joined = false;
+                g_mapLoadSince = GetTickCount();  // si pidiera entrar ya, el host lo haria aparecer quieto durante la carga
                 buf[len - 1] = 0;
                 char cmd[96];
                 snprintf(cmd, sizeof cmd, "map %.63s\n", (const char*)body);
@@ -1242,7 +1358,8 @@ extern "C" int __cdecl Cod2_Snapshot()
     }
     if (g_role == JOINER) {
         if (!g_joined) {
-            if (GetTickCount() - g_lastJoinTry > 1000) JoinerSendJoin();
+            if (g_mapLoadSince && GetTickCount() - g_mapLoadSince > 120000) g_mapLoadSince = 0;  // el mapa no cargo
+            if (!g_mapLoadSince && GetTickCount() - g_lastJoinTry > 1000) JoinerSendJoin();
             return 1;
         }
         if (g_rxBlockNew) {
@@ -1378,8 +1495,10 @@ extern "C" void __cdecl Cod2_SetupClients()
     for (auto& r : g_remote) r.active = false;  // mapa nuevo: los remotos vuelven a entrar
     for (int n = 0; n < MAX_CLIENTS; ++n) g_bodyTree[n] = nullptr, g_bodyAnim[n] = -1;  // las tablas de DObj se vacian
     memset(g_downed, 0, sizeof g_downed);
+    memset(g_rideParent, 0, sizeof g_rideParent);
     g_levelStart = GetTickCount();
     g_joined = false;
+    g_mapLoadSince = 0;
     static bool cmds;
     if (!cmds) {
         cmds = true;
