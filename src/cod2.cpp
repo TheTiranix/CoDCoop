@@ -54,6 +54,13 @@ const char* MapName()
     return name ? name : "";
 }
 
+// el mapa del nivel que corre aca, o "" sin nivel (menu): mapname queda con el ultimo mapa despues de salir
+const char* LevelMap()
+{
+    uint8_t* d = Dvar_FindVar("sv_running");
+    return d && d[8] ? MapName() : "";
+}
+
 void Cbuf_AddText(const char* text)
 {
     asm volatile("call *%1" : "+a"(text) : "r"((uintptr_t)0x41afc0) : "ecx", "edx", "memory");
@@ -121,7 +128,11 @@ void ClientBegin(int n) { asm volatile("call *%1" : "+a"(n) : "r"(CLIENT_BEGIN) 
 // ---------- red ----------
 constexpr uint16_t PORT = 28962;
 constexpr uint32_t MAGIC = 0x504f4332;  // "2COP"
-enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CMD = 'C', M_SNAP = 'S', M_REJOIN = 'R' };
+enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CMD = 'C', M_SNAP = 'S', M_REJOIN = 'R', M_PING = 'P',
+                 M_BYE = 'B' };
+// Si no llega nada de un remoto en 15 s el host lo saca; si no llega nada del host en 20 s el que se une vuelve al
+// menu. Sin nivel corriendo (carga, pausa) cada lado manda M_PING cada segundo para que no lo den por perdido.
+constexpr DWORD REMOTE_TIMEOUT = 15000, HOST_TIMEOUT = 20000;
 enum Role { NONE, HOST, JOINER } g_role;
 SOCKET g_sock = INVALID_SOCKET;
 
@@ -130,6 +141,8 @@ struct Remote {
     sockaddr_in addr;
 } g_remote[MAX_CLIENTS];
 DWORD g_joinedAt[MAX_CLIENTS];  // host: cuando entro cada remoto
+DWORD g_lastHeard[MAX_CLIENTS];  // host: ultimo paquete de cada remoto
+DWORD g_hostHeard;               // joiner: ultimo paquete del host
 DWORD g_levelStart;              // host: G_InitGame (nivel nuevo o partida cargada)
 bool g_downed[MAX_CLIENTS];      // host: caido esperando que lo levanten
 float g_reviveTime[MAX_CLIENTS]; // host: segundos que un companero lleva levantandolo
@@ -879,7 +892,7 @@ void HostJoin(const sockaddr_in& from, const uint8_t* body, int len)
             return;
         }
         g_remote[n] = {true, from};
-        g_joinedAt[n] = GetTickCount();
+        g_joinedAt[n] = g_lastHeard[n] = GetTickCount();
         memset(g_dobjSig[n], 0xff, sizeof g_dobjSig[n]);  // la primera vez va todo, incluso "sin DObj"
         memset(g_entKnown[n], 0, sizeof g_entKnown[n]);
         *(uint8_t**)(Client(n) + CL_GENTITY) = Entity(n);
@@ -1133,8 +1146,33 @@ void HostDropGhosts()
     }
 }
 
+// el remoto se fue (coop2leave), dejo de responder o el host deja de crear partida
+void DropRemote(int n, const char* why)
+{
+    Log("host: jugador %d fuera (%s)", n + 1, why);
+    g_remote[n].active = false;
+    g_downed[n] = false;
+    g_rideParent[n] = nullptr;
+    if (*(int*)(GClient(n) + GC_CONNECTED) == 2) {
+        ((void(__cdecl*)(uint8_t*))G_FREE_ENTITY)(Entity(n));
+        *(int*)(GClient(n) + GC_CONNECTED) = 0;
+        *(uint8_t**)(Client(n) + CL_GENTITY) = nullptr;
+    }
+    char text[64];
+    snprintf(text, sizeof text, "^3Player %d left", n + 1);
+    Announce(false, text);
+}
+
+void HostTimeouts()
+{
+    DWORD now = GetTickCount();
+    for (int n = 1; n < MAX_CLIENTS; ++n)
+        if (g_remote[n].active && now - g_lastHeard[n] > REMOTE_TIMEOUT) DropRemote(n, "no responde");
+}
+
 void HostSendSnapshots()
 {
+    HostTimeouts();
     HostDropGhosts();
     HostRides();
     HostCatchUp();
@@ -1178,7 +1216,7 @@ void HostSendSnapshots()
 void JoinerSendJoin()
 {
     Packet p(M_JOIN);
-    const char* map = MapName();  // "" en el menu principal
+    const char* map = LevelMap();
     p.Put(map, (int)strlen(map) + 1);
     p.Send(g_host);
     g_lastJoinTry = GetTickCount();
@@ -1207,6 +1245,8 @@ void JoinerSnapshot(const uint8_t* p, int len)
     g_rxSnapNew = true;
 }
 
+void JoinerLost(const char* why);
+
 void Poll()
 {
     if (g_sock == INVALID_SOCKET) return;
@@ -1221,16 +1261,26 @@ void Poll()
         const uint8_t* body = buf + 5;
         int bodyLen = len - 5;
         if (g_role == HOST) {
+            int who = 0;
+            for (int n = 1; n < MAX_CLIENTS && !who; ++n)
+                if (g_remote[n].active && SameAddr(g_remote[n].addr, from)) who = n;
+            if (who) g_lastHeard[who] = GetTickCount();
             if (type == M_JOIN) HostJoin(from, body, bodyLen);
             else if (type == M_CMD) HostUsercmd(from, body, bodyLen);
+            else if (type == M_BYE && who) DropRemote(who, "se fue");
         } else if (g_role == JOINER && SameAddr(from, g_host)) {
+            g_hostHeard = GetTickCount();
+            if (type == M_BYE) {
+                JoinerLost("The host stopped the co-op game.");
+                break;
+            }
             if (type == M_ACCEPT && bodyLen >= 4 && !g_joined) {
                 g_joined = true;
                 g_slot = *(const int*)body;
                 Log("joiner: el host me acepto como jugador %d", g_slot + 1);
                 Status("Connected to the host as player %d.", g_slot + 1);
             } else if (type == M_REJOIN && !g_mapLoadSince && bodyLen > 1 && !buf[len - 1] &&
-                       (g_joined || _stricmp((const char*)body, MapName()))) {
+                       (g_joined || _stricmp((const char*)body, LevelMap()))) {
                 // El host cargo un punto de control o paso a otro nivel (su hora vuelve atras o empieza de nuevo y el
                 // cliente de aca no acepta snapshots mas viejos que los que ya mostro), o este juego esta en otro mapa
                 // o en el menu: se carga el mapa del host y, al terminar (G_InitGame), se vuelve a pedir entrar.
@@ -1256,6 +1306,18 @@ void Poll()
             }
         }
     }
+}
+
+// el que se une deja la partida: vuelve al menu si estaba en un nivel del host
+void JoinerLost(const char* why)
+{
+    Log("joiner: fuera (%s)", why);
+    bool inLevel = g_joined;
+    g_role = NONE;
+    g_joined = false;
+    g_mapLoadSince = 0;
+    Status("%s", why);
+    if (inLevel) Cbuf_AddText("disconnect\n");
 }
 
 void DeliverCommands(uint8_t* block)
@@ -1296,6 +1358,24 @@ void Cmd_Host()
     Status("Hosting on UDP port %d. Start or load a mission; the others join with your IP.", PORT);
 }
 
+// coop2leave: el que se une se va de la partida; el host deja de crear partida (los demas vuelven al menu)
+void Cmd_Leave()
+{
+    if (g_role == JOINER) {
+        Packet(M_BYE).Send(g_host);
+        JoinerLost("Disconnected.");
+    } else if (g_role == HOST) {
+        for (int n = 1; n < MAX_CLIENTS; ++n) {
+            if (!g_remote[n].active) continue;
+            Packet(M_BYE).Send(g_remote[n].addr);
+            DropRemote(n, "el host dejo de crear partida");
+        }
+        g_role = NONE;
+        Log("host: deja de crear partida");
+        Status("Stopped hosting. The game goes on single player.");
+    }
+}
+
 void Cmd_Join()
 {
     // coop2join <IP o nombre> (cmd_argc 0x6c0280, cmd_argv 0x6bb680, como los lee writeconfig 0x42ea40); sin
@@ -1303,6 +1383,9 @@ void Cmd_Join()
     char ip[64] = "";
     if (*(int*)0x6c0280 >= 2) {
         sscanf(((const char**)0x6bb680)[1], "%63s", ip);
+        char cmd[96];  // el campo de la ventana Co-op la recuerda
+        snprintf(cmd, sizeof cmd, "seta coop2_ip \"%s\"\n", ip);
+        if (!strpbrk(ip, "\";")) Cbuf_AddText(cmd);
     } else if (uint8_t* d = Dvar_FindVar("coop2_ip")) {
         const char* v = *(const char**)(d + 8);
         if (v) sscanf(v, "%63s", ip);
@@ -1326,6 +1409,7 @@ void Cmd_Join()
     }
     g_role = JOINER;
     g_joined = false;
+    g_hostHeard = GetTickCount();
     Log("joiner: uniendome a %s:%d", ip, PORT);
     Status("Joining %s...", ip);
     JoinerSendJoin();
@@ -1414,6 +1498,10 @@ extern "C" int __cdecl Cod2_Snapshot()
             if (!g_mapLoadSince && GetTickCount() - g_lastJoinTry > 1000) JoinerSendJoin();
             return 1;
         }
+        if (GetTickCount() - g_hostHeard > HOST_TIMEOUT) {
+            JoinerLost("Lost the connection to the host.");
+            return 1;
+        }
         if (g_rxBlockNew) {
             g_rxBlockNew = false;
             DeliverCommands(g_rxBlock);
@@ -1455,6 +1543,7 @@ void RegisterCommands()
     done = true;
     Cmd_AddCommand("coop2host", Cmd_Host);
     Cmd_AddCommand("coop2join", Cmd_Join);
+    Cmd_AddCommand("coop2leave", Cmd_Leave);
     Cmd_AddCommand("coop2hurt", Cmd_Hurt);
     Cmd_AddCommand("coop2save", Cmd_Save);
     if (!Dvar_FindVar("coop2_ip")) Cbuf_AddText("seta coop2_ip \"\"\n");
@@ -1467,8 +1556,23 @@ extern "C" void __cdecl Cod2_ComFrame()
     RegisterCommands();  // coop2join tambien desde el menu principal
     if (GetTickCount() - g_lastLevelFrame < 500) return;  // en un nivel atiende Cod2_Snapshot
     PollCommandFile();
+    static DWORD lastPing;
+    bool ping = GetTickCount() - lastPing > 1000;
+    if (ping) lastPing = GetTickCount();
+    if (g_role == HOST) {  // en pausa o cargando: el host no atiende, pero avisa que sigue ahi
+        if (ping)
+            for (int n = 1; n < MAX_CLIENTS; ++n)
+                if (g_remote[n].active) Packet(M_PING).Send(g_remote[n].addr);
+        return;
+    }
     if (g_role != JOINER) return;
     Poll();
+    if (g_role != JOINER) return;
+    if (g_joined && ping) Packet(M_PING).Send(g_host);  // esperando "clic para empezar"
+    if (g_joined && GetTickCount() - g_hostHeard > HOST_TIMEOUT) {
+        JoinerLost("Lost the connection to the host.");
+        return;
+    }
     if (g_mapLoadSince && GetTickCount() - g_mapLoadSince > 120000) g_mapLoadSince = 0;
     if (!g_joined && !g_mapLoadSince && GetTickCount() - g_lastJoinTry > 1000) JoinerSendJoin();
 }

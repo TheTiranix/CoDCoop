@@ -4,7 +4,7 @@
 		name "coop_popmenu"
 		visible 0
 		fullscreen 0
-		rect 184 110 275 230
+		rect 184 100 275 255
 		focusColor GLOBAL_FOCUSED_COLOR
 		style 1
 		border 1
@@ -15,7 +15,7 @@
 		{
 			name backimage2fade
 			style WINDOW_STYLE_SHADER
-			rect -312 -112 896 484
+			rect -312 -102 896 484
 			background "white"
 			forecolor 0 0 0 0.3
 			backcolor 0 0 0 0.3
@@ -26,7 +26,7 @@
 		{
 			name backimage2fade
 			style WINDOW_STYLE_SHADER
-			rect -130 2 535 245
+			rect -130 2 535 270
 			background "popmenu_bg"
 			visible 1
 			decoration
@@ -117,6 +117,25 @@
 			action { play "mouse_click"; exec "coop2join"; }
 			mouseEnter { play "mouse_over"; }
 		}
+		// salir de la partida (el que se une vuelve al menu; el host deja de crear partida)
+		itemDef
+		{
+			name		leave
+			text		"Disconnect"
+			type		1
+			textscale	.35
+			style		UI_BUTTON_STYLE
+			textfont	UI_FONT_NORMAL
+			textstyle	ITEM_TEXTSTYLE_SHADOWED
+			rect		60 150 155 22
+			textalign	1
+			textalignx	77
+			textaligny	17
+			forecolor	UI_BUTTON_TEXT_COLOR
+			visible		1
+			action { play "mouse_click"; exec "coop2leave"; }
+			mouseEnter { play "mouse_over"; }
+		}
 		itemDef
 		{
 			name		back
@@ -126,7 +145,7 @@
 			style		UI_BUTTON_STYLE
 			textfont	UI_FONT_NORMAL
 			textstyle	ITEM_TEXTSTYLE_SHADOWED
-			rect		60 150 155 22
+			rect		60 176 155 22
 			textalign	1
 			textalignx	77
 			textaligny	17
@@ -140,7 +159,7 @@
 		itemDef
 		{
 			name		status
-			rect		15 180 245 45
+			rect		15 205 245 45
 			type		ITEM_TYPE_TEXT
 			style		0
 			textstyle	ITEM_TEXTSTYLE_SHADOWED
