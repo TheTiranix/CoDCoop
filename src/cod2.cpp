@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <initializer_list>
 #include "hook.h"
 
 namespace {
@@ -377,8 +378,27 @@ void JoinerApplyEntities(const uint8_t* p, int len)
     }
 }
 
+// Los arboles de animacion salen de la memoria de los scripts (XAnimCreateTree 0x42f280 pide 5 * nodos + 9 bytes a
+// MT_AllocIndex). Como G_FreeEntity (0x4d7d41..0x4d7d77): XAnimClearTree 0x478db0 (arbol, 0), XAnimFreeTree 0x478e10
+// (arbol) y MT_Free 0x45ee80 (arbol, tamano). Sin esto cada DObj rearmado dejaba su arbol (5 KB un soldado) y en
+// niveles con muchos soldados (duhoc_assault) el que se une se quedaba sin memoria en un minuto ("failed memory
+// allocation for script usage"). Solo los arboles armados aca: los de las entidades del juego (ent+0x1f4) los suelta el.
+constexpr int GE_TREE = 0x1f4;
+uint8_t* g_ownTree[MAX_ENTS];
+void FreeTree(uint8_t* tree)
+{
+    int size = *(int*)(*(uint8_t**)tree + 4) * 5 + 9;
+    ((void(__cdecl*)(uint8_t*, int))0x478db0)(tree, 0);
+    ((void(__cdecl*)(uint8_t*))0x478e10)(tree);
+    ((void(__cdecl*)(uint8_t*, int))0x45ee80)(tree, size);
+}
+
 void FreeClientDObj(int e)
 {
+    uint8_t* d = ClientDObj(e);
+    uint8_t* tree = d ? *(uint8_t**)d : nullptr;
+    if (tree && tree == g_ownTree[e]) FreeTree(tree);
+    g_ownTree[e] = nullptr;
     int ent = e;
     g_ourFree = true;
     asm volatile("call *%1" : "+c"(ent) : "r"(CL_DOBJ_FREE) : "eax", "edx", "memory");
@@ -432,6 +452,8 @@ void JoinerApplyDObjs(const uint8_t* p, int len)
             uint8_t* tree = xanim ? CreateTree(xanim) : nullptr;
             CreateClientDObj(e, models, nm, tree);
             d = ClientDObj(e);
+            if (tree && !d) FreeTree(tree);
+            g_ownTree[e] = d ? tree : nullptr;
             static int created;
             if (created++ < 20) Log("joiner: DObj %d con %d modelos (arbol %p)", e, nm, (void*)tree);
             if (!d) continue;
@@ -532,8 +554,67 @@ bool EntityWeapon(int e, void** model, const char** tag)
     return false;
 }
 
+void* LevelModel(const char* name)  // modelo del nivel por nombre (sin "xmodel/")
+{
+    for (int i = 1; i < 256; ++i) {
+        void* m = ((void**)G_MODELS)[i];
+        if (m && !_stricmp(ModelName(m), name)) return m;
+    }
+    return nullptr;
+}
+
+// En los niveles sin soldados aliados (libya, los de tanques) no hay de donde copiar un cuerpo aliado: al terminar la
+// precarga del nivel (0x4da470 corre el primer frame con level.initializing 0x1c60528 en 1) se precargan cuerpo, cabeza
+// y casco de la campana del mapa, como la elige maps\_loadout.gsc. Pasa igual en el host y en el que se une (mismo mapa,
+// misma precarga), asi que quedan con el mismo indice de modelo en los dos.
+// G_ModelIndex (0x4d59f0, EDI = "xmodel/...") corta el juego si no hay lugar: el modelo i esta libre si su configstring
+// (u16 en 0x81545a + i*2, string del script) es "".
+constexpr uintptr_t G_MODEL_INDEX = 0x4d59f0, PRECACHE_END = 0x4da52c, MODEL_CONFIGSTRINGS = 0x81545a;
+const char* const* CampaignBody()
+{
+    static const char* const russian[] = {"xmodel/character_russian_trench_b", "xmodel/head_russian_winter_jon",
+                                          "xmodel/helmet_russian_padded_b"};
+    static const char* const africa[] = {"xmodel/character_british_afrca_body", "xmodel/head_british_paul",
+                                         "xmodel/helmet_british_afrca"};
+    static const char* const normandy[] = {"xmodel/character_british_normandy_a", "xmodel/head_british_paul",
+                                           "xmodel/helmet_british_normandy_a"};
+    static const char* const american[] = {"xmodel/character_us_ranger_pvt_a", "xmodel/head_us_ranger_david",
+                                           "xmodel/helmet_us_ranger_generic"};
+    const char* map = MapName();
+    for (const char* m : {"moscow", "trainyard", "downtown_sniper", "downtown_assault", "cityhall", "tankhunt", "demolition"})
+        if (!_stricmp(map, m)) return russian;
+    for (const char* m : {"decoytrenches", "decoytown", "elalamein", "eldaba", "libya", "88ridge", "toujane",
+                          "toujane_ride", "matmata"})
+        if (!_stricmp(map, m)) return africa;
+    for (const char* m : {"beltot", "crossroads", "newvillers", "breakout"})
+        if (!_stricmp(map, m)) return normandy;
+    return american;
+}
+
+extern "C" void __cdecl Cod2_PrecacheEnd()
+{
+    int firstFree = 1;
+    uintptr_t base = *(uintptr_t*)SL_STRINGS;
+    for (; firstFree < 256; ++firstFree) {
+        uint16_t s = *(uint16_t*)(MODEL_CONFIGSTRINGS + firstFree * 2);
+        if (!s || !*(const char*)(base + 4 + s * 8)) break;
+    }
+    const char* const* names = CampaignBody();
+    if (firstFree + 3 > 256) {
+        Log("precarga: sin lugar para el cuerpo aliado (%d modelos)", firstFree - 1);
+        return;
+    }
+    int idx[3];
+    for (int k = 0; k < 3; ++k) {
+        const char* name = names[k];
+        asm volatile("call *%2" : "=a"(idx[k]), "+D"(name) : "r"(G_MODEL_INDEX) : "ecx", "edx", "memory");
+    }
+    Log("precarga: cuerpo aliado %s (modelos %d %d %d)", names[0] + 7, idx[0], idx[1], idx[2]);
+}
+
 // Partes de un soldado aliado del nivel (de algun DObj con el XAnim de los humanos): cuerpo, cabeza, casco/gorra y
-// su arma. Primero uno con arma (los personajes con nombre no la tienen en el DObj).
+// su arma. Primero uno con arma (los personajes con nombre no la tienen en el DObj). Si en el nivel no hay aliados, el
+// precargado de la campana con el XAnim de cualquier humano.
 int FindBodyModels(void** out, void** weapon, const char** tag)
 {
     for (int pass = 0; pass < 3; ++pass)
@@ -548,6 +629,11 @@ int FindBodyModels(void** out, void** weapon, const char** tag)
             if ((pass == 0 && !(allied && armed)) || (pass == 1 && !allied)) continue;
             if (!armed) *weapon = nullptr;
             int count = 0;
+            if (pass == 2) {
+                const char* const* names = CampaignBody();
+                while (count < 3 && (out[count] = LevelModel(names[count] + 7))) ++count;
+                if (count < 3) count = 0;
+            }
             for (int k = 0; k < d[0x18] && count < 3; ++k) {
                 void* m = *(void**)(d + 0x1c + k * 4);
                 const char* name = ModelName(m);
@@ -573,11 +659,7 @@ void* PlayerWeaponModel(int n)
     const char* name = def && !IsBadReadPtr(def + WD_WORLD_MODEL, 4) ? *(const char**)(def + WD_WORLD_MODEL) : nullptr;
     if (!name || IsBadReadPtr(name, 8)) return nullptr;
     if (!_strnicmp(name, "xmodel/", 7)) name += 7;
-    for (int i = 1; i < 256; ++i) {
-        void* m = ((void**)G_MODELS)[i];
-        if (m && !_stricmp(ModelName(m), name)) return m;
-    }
-    return nullptr;
+    return LevelModel(name);
 }
 
 // "tag_weapon_right" como string del juego, cuando ningun soldado del nivel tiene arma (niveles de tanques)
@@ -613,6 +695,7 @@ void CreateBody(int n)
     if (ClientDObj(n)) FreeClientDObj(n);
     uint8_t* tree = CreateTree(g_humanXAnim);
     CreateClientDObj(n, models, nm, tree);
+    g_ownTree[n] = tree;
     g_bodyTree[n] = tree;
     g_bodyAnim[n] = -1;
     for (int a = 0; a < BA_COUNT; ++a) g_animIndex[a] = AnimIndex(g_humanXAnim, kBodyAnimName[a]);
@@ -1173,6 +1256,32 @@ void HostCatchUp()
 // Un jugador de la partida cargada que no vuelve en 90 s se saca (si no, queda su cuerpo quieto en el mapa)
 constexpr DWORD GHOST_MS = 90000;  // el que se une recarga el mapa para volver
 constexpr uintptr_t G_FREE_ENTITY = 0x4d7c30;  // cdecl (gentity)
+// Sentients (a quien apuntan los soldados): level.sentients (0x1c60518), 33 de 0x44 bytes, +0 entidad, +0x3e en uso;
+// Sentient_Free 0x514d50 (cdecl) los suelta. G_FreeEntity suelta el de ent+0x104, pero tras cargar una partida y volver
+// a entrar el remoto puede quedar con otro en uso apuntando a su entidad: un soldado que lo tenia de enemigo leia la
+// entidad ya borrada y el host se caia (0x4e8b76, ent->client nulo).
+constexpr uintptr_t LEVEL_SENTIENTS = 0x1c60518, SENTIENT_FREE = 0x514d50;
+constexpr int GE_INUSE = 0xa4;  // r.inUse (como lo mira getent, 0x4fa0e0)
+void FreeSentientsOf(int n)  // los que siguen en uso apuntando a la entidad n, que ya esta libre
+{
+    uint8_t* sentients = *(uint8_t**)LEVEL_SENTIENTS;
+    for (int i = 0; i < 33; ++i) {
+        uint8_t* s = sentients + i * 0x44;
+        if (!s[0x3e] || *(uint8_t**)s != Entity(n)) continue;
+        Log("host: el sentient %d seguia apuntando al jugador %d: se suelta", i, n + 1);
+        ((void(__cdecl*)(uint8_t*))SENTIENT_FREE)(s);
+        s[0x3e] = 0;
+    }
+}
+
+void FreePlayerEntity(int n)
+{
+    ((void(__cdecl*)(uint8_t*))G_FREE_ENTITY)(Entity(n));
+    *(int*)(GClient(n) + GC_CONNECTED) = 0;
+    *(uint8_t**)(Client(n) + CL_GENTITY) = nullptr;
+    FreeSentientsOf(n);
+}
+
 void HostDropGhosts()
 {
     if (GetTickCount() - g_levelStart < GHOST_MS) return;
@@ -1180,9 +1289,7 @@ void HostDropGhosts()
         if (g_remote[n].active || *(int*)(GClient(n) + GC_CONNECTED) != 2) continue;
         Log("host: el jugador %d de la partida cargada no volvio, se saca", n + 1);
         g_downed[n] = false;
-        ((void(__cdecl*)(uint8_t*))G_FREE_ENTITY)(Entity(n));
-        *(int*)(GClient(n) + GC_CONNECTED) = 0;
-        *(uint8_t**)(Client(n) + CL_GENTITY) = nullptr;
+        FreePlayerEntity(n);
     }
 }
 
@@ -1193,14 +1300,15 @@ void DropRemote(int n, const char* why)
     g_remote[n].active = false;
     g_downed[n] = false;
     g_rideParent[n] = nullptr;
-    if (*(int*)(GClient(n) + GC_CONNECTED) == 2) {
-        ((void(__cdecl*)(uint8_t*))G_FREE_ENTITY)(Entity(n));
-        *(int*)(GClient(n) + GC_CONNECTED) = 0;
-        *(uint8_t**)(Client(n) + CL_GENTITY) = nullptr;
-    }
+    if (*(int*)(GClient(n) + GC_CONNECTED) == 2) FreePlayerEntity(n);
     char text[64];
     snprintf(text, sizeof text, "^3Player %d left", n + 1);
     Announce(false, text);
+    if (g_downed[0] && !AnyRemote()) {  // el host caido se quedo solo: nadie lo puede levantar
+        int max = *(int*)(Entity(0) + GE_MAXHEALTH);
+        SetHealth(0, max > 1 ? max / 2 : 50);
+        SetDowned(0, false);
+    }
 }
 
 void HostTimeouts()
@@ -1317,7 +1425,16 @@ void Poll()
             if (type == M_ACCEPT && bodyLen >= 4 && !g_joined) {
                 g_joined = true;
                 g_slot = *(const int*)body;
-                Log("joiner: el host me acepto como jugador %d", g_slot + 1);
+                // el nivel de aca queda congelado: sus DObj no se dibujan (se dibujan los del host) y sus arboles de
+                // animacion ocupan la memoria de los scripts que necesitan los del host
+                int freed = 0, trees = 0;
+                for (int e = 0; e < MAX_ENTS; ++e) {
+                    if (ClientDObj(e)) FreeClientDObj(e), ++freed;
+                    uint8_t*& tree = *(uint8_t**)(Entity(e) + GE_TREE);  // queda en 0: G_FreeEntity no lo suelta de nuevo
+                    if (Entity(e)[GE_INUSE] && tree) FreeTree(tree), tree = nullptr, ++trees;
+                }
+                Log("joiner: el host me acepto como jugador %d (nivel local: %d DObj y %d arboles liberados)", g_slot + 1,
+                    freed, trees);
                 Status("Connected to the host as player %d.", g_slot + 1);
             } else if (type == M_REJOIN && !g_mapLoadSince && bodyLen > 1 && !buf[len - 1] &&
                        (g_joined || _stricmp((const char*)body, LevelMap()))) {
@@ -1632,7 +1749,17 @@ extern "C" int __cdecl Cod2_RunFrame(int partial, int limit)
         ((void(__cdecl*)())0x409ed0)();
         return 1;
     }
-    return g_runFrame(partial, limit);
+    int r = g_runFrame(partial, limit);
+    for (int n = 1; n < MAX_CLIENTS; ++n)
+        if (!Entity(n)[GE_INUSE]) FreeSentientsOf(n);  // lugar de jugador libre (tambien tras cargar una partida)
+    static uint8_t* lastParent;  // para el log: a que esta enganchado el host (scripts de vehiculos y cinematicas)
+    uint8_t* parent = LinkParent(0);
+    if (parent != lastParent) {
+        if (parent) Log("host: enganchado a la entidad %d", (int)(parent - (uint8_t*)G_ENTITIES) / GENTITY_SIZE);
+        else Log("host: suelto");
+        lastParent = parent;
+    }
+    return r;
 }
 
 asm(R"(
@@ -1669,6 +1796,37 @@ _Cod2_SnapshotStub:
     mov eax, 0x44b180
     call eax
 2:  ret
+.globl _Cod2_GetEntMatch
+_Cod2_GetEntMatch:
+    movzx edx, ax
+    cmp edx, ebp
+    jne 4f
+    cmp edi, 1
+    jb 5f
+    cmp edi, 4
+    jb 4f
+5:  push 0x4fa0fd
+    ret
+4:  push 0x4fa11b
+    ret
+.globl _Cod2_NoDObjBounds
+_Cod2_NoDObjBounds:
+    xor eax, eax
+    mov dword ptr [edx], eax
+    mov dword ptr [edx+4], eax
+    mov dword ptr [edx+8], eax
+    mov dword ptr [ecx], eax
+    mov dword ptr [ecx+4], eax
+    mov dword ptr [ecx+8], eax
+    ret
+.globl _Cod2_PrecacheEndStub
+_Cod2_PrecacheEndStub:
+    pushad
+    call _Cod2_PrecacheEnd
+    popad
+    mov dword ptr [0x9ff014], esi
+    mov dword ptr [0x1c60528], esi
+    ret
 .globl _Cod2_CgameSnapStub
 _Cod2_CgameSnapStub:
     push dword ptr [esp+8]
@@ -1710,6 +1868,9 @@ extern "C" void Cod2_LocalThinkStub();
 extern "C" void Cod2_ReliableStub();
 extern "C" void Cod2_SnapshotStub();
 extern "C" void Cod2_CgameSnapStub();
+extern "C" void Cod2_PrecacheEndStub();
+extern "C" void Cod2_NoDObjBounds();
+extern "C" void Cod2_GetEntMatch();
 
 // Llamado desde G_InitGame: level.clients pasa a un arreglo de 4 y las entidades 0..3 quedan para jugadores.
 extern "C" void __cdecl Cod2_SetupClients()
@@ -1723,6 +1884,7 @@ extern "C" void __cdecl Cod2_SetupClients()
     *(int*)SV_GENTITIES_NUM = MAX_CLIENTS;
     for (auto& r : g_remote) r.active = false;  // mapa nuevo: los remotos vuelven a entrar
     for (int n = 0; n < MAX_CLIENTS; ++n) g_bodyTree[n] = nullptr, g_bodyAnim[n] = -1;  // las tablas de DObj se vacian
+    memset(g_ownTree, 0, sizeof g_ownTree);
     memset(g_downed, 0, sizeof g_downed);
     memset(g_rideParent, 0, sizeof g_rideParent);
     g_levelStart = GetTickCount();
@@ -1754,7 +1916,7 @@ bool Expect(uintptr_t addr, const char* bytes, size_t n)
 
 void CallTo(uintptr_t at, void* target, int len)  // call rel32 + nops
 {
-    uint8_t patch[8] = {0xE8, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+    uint8_t patch[16] = {0xE8, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
     *(int32_t*)(patch + 1) = (int32_t)((uintptr_t)target - (at + 5));
     hook::Write(at, patch, len);
 }
@@ -1798,6 +1960,27 @@ void Install()
     CallTo(SNAPSHOT_CALL, (void*)Cod2_SnapshotStub, 5);
     CallTo(CGAME_SNAP_CALL, (void*)Cod2_CgameSnapStub, 5);
     if (Expect(0x42edea, "\xe8\xb1\x02\x02\x00", 5)) CallTo(0x42edea, (void*)Cod2_ComFrameStub, 5);  // Com_Frame
+    if (Expect(PRECACHE_END, "\x89\x35\x14\xf0\x9f\x00\x89\x35\x28\x05\xc6\x01", 12))
+        CallTo(PRECACHE_END, (void*)Cod2_PrecacheEndStub, 12);  // fin de la precarga del nivel
+    // En el que se une la tabla de DObj es la del host, pero los trazos del movimiento local (ClientThink) cruzan las
+    // entidades de su propio nivel congelado: los limites del DObj de una entidad (0x4481c0, EAX = entidad, EDX/ECX =
+    // min/max) leen sin mirar si hay DObj y el juego se caia (0x4481e1) cuando el host ya no tenia esa entidad. Sin DObj:
+    // limites vacios (je al relleno de int3 en 0x448205, de ahi jmp a Cod2_NoDObjBounds).
+    if (Expect(0x4481cf, "\x74\x0d", 2) && Expect(0x448205, "\xcc\xcc\xcc\xcc\xcc", 5)) {
+        uint8_t jmp[5] = {0xE9, 0, 0, 0, 0};
+        *(int32_t*)(jmp + 1) = (int32_t)((uintptr_t)Cod2_NoDObjBounds - (0x448205 + 5));
+        hook::Write(0x448205, jmp, 5);
+        hook::Write(0x4481cf, "\x74\x34", 2);
+    }
+    // getent (0x4fa090) corta el hilo del script si encuentra dos entidades: animscripts\init.gsc hace
+    // level.player = getent("player", "classname") con el primer soldado del nivel, y si un remoto ya entro (se une en
+    // "clic para empezar") level.player queda sin definir y el nivel se rompe (en duhoc_assault no se baja del bote).
+    // Los remotos (entidades 1..3, MAX_CLIENTS = 4 en Cod2_GetEntMatch) no cuentan para getent: el script ve un jugador.
+    if (Expect(0x4fa0f6, "\x0f\xb7\xd0\x3b\xd5\x75\x1e", 7)) {
+        uint8_t jmp[7] = {0xE9, 0, 0, 0, 0, 0x90, 0x90};
+        *(int32_t*)(jmp + 1) = (int32_t)((uintptr_t)Cod2_GetEntMatch - (0x4fa0f6 + 5));
+        hook::Write(0x4fa0f6, jmp, 7);
+    }
     g_runFrame = (int(__cdecl*)(int, int))hook::Inline(G_RUN_FRAME, (void*)Cod2_RunFrame, 5);
     if (Expect(G_DAMAGE, "\x83\xec\x20\x53\x55", 5)) g_gDamage = (GDamageFn)hook::Inline(G_DAMAGE, (void*)Cod2_GDamage, 5);
     uint8_t jmp[9] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};  // DObj_Free -> Cod2_FreeDObjStub
