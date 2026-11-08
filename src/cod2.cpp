@@ -559,6 +559,40 @@ int FindBodyModels(void** out, void** weapon, const char** tag)
     return 0;
 }
 
+// El arma que el jugador tiene en la mano (playerState +0xb0): su definicion (0x1c64548[arma], como la usa
+// ClientEndFrame) trae en +0x1b4 el nombre del modelo ("xmodel/weapon_svt40"), que se busca entre los modelos del
+// nivel. Si no esta cargado queda el arma del soldado copiado.
+constexpr uintptr_t WEAPON_DEFS = 0x1c64548;
+constexpr int PS_WEAPON = 0xb0, WD_WORLD_MODEL = 0x1b4;
+int g_bodyWeapon[MAX_CLIENTS];
+
+void* PlayerWeaponModel(int n)
+{
+    int w = *(int*)(GClient(n) + PS_WEAPON);
+    uint8_t* def = w > 0 && w < 128 ? ((uint8_t**)WEAPON_DEFS)[w] : nullptr;
+    const char* name = def && !IsBadReadPtr(def + WD_WORLD_MODEL, 4) ? *(const char**)(def + WD_WORLD_MODEL) : nullptr;
+    if (!name || IsBadReadPtr(name, 8)) return nullptr;
+    if (!_strnicmp(name, "xmodel/", 7)) name += 7;
+    for (int i = 1; i < 256; ++i) {
+        void* m = ((void**)G_MODELS)[i];
+        if (m && !_stricmp(ModelName(m), name)) return m;
+    }
+    return nullptr;
+}
+
+// "tag_weapon_right" como string del juego, cuando ningun soldado del nivel tiene arma (niveles de tanques)
+const char* SlString(const char* text)
+{
+    uintptr_t base = *(uintptr_t*)SL_STRINGS;
+    size_t len = strlen(text) + 1;
+    for (int i = 1; i < 0x10000; ++i) {
+        const char* p = (const char*)(base + 4 + i * 8);
+        if (IsBadReadPtr(p, len)) break;
+        if (!memcmp(p, text, len)) return p;
+    }
+    return nullptr;
+}
+
 void CreateBody(int n)
 {
     void* parts[3];
@@ -566,6 +600,12 @@ void CreateBody(int n)
     const char* tag = nullptr;
     int count = FindBodyModels(parts, &weapon, &tag);
     if (count < 2 || !g_humanXAnim) return;
+    g_bodyWeapon[n] = *(int*)(GClient(n) + PS_WEAPON);
+    if (void* mine = PlayerWeaponModel(n)) {
+        weapon = mine;
+        if (!tag) tag = SlString("tag_weapon_right");
+        if (!tag) weapon = nullptr;
+    }
     struct { void* model; const char* tag; int noCollide; } models[4];
     int nm = 0;
     for (int k = 0; k < count; ++k) models[nm++] = {parts[k], nullptr, 1};
@@ -650,7 +690,7 @@ void HostBodies(float dt)
             g_bodyTree[n] = nullptr;
             continue;
         }
-        if (!has) CreateBody(n);
+        if (!has || g_bodyWeapon[n] != *(int*)(GClient(n) + PS_WEAPON)) CreateBody(n);  // nuevo o cambio de arma
         if (g_bodyTree[n]) AnimateBody(n, dt);
     }
 }
