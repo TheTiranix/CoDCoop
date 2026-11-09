@@ -570,6 +570,7 @@ void* LevelModel(const char* name)  // modelo del nivel por nombre (sin "xmodel/
 // G_ModelIndex (0x4d59f0, EDI = "xmodel/...") corta el juego si no hay lugar: el modelo i esta libre si su configstring
 // (u16 en 0x81545a + i*2, string del script) es "".
 constexpr uintptr_t G_MODEL_INDEX = 0x4d59f0, PRECACHE_END = 0x4da52c, MODEL_CONFIGSTRINGS = 0x81545a;
+constexpr uintptr_t SHUTDOWN_GAME_CALL = 0x4489b1;  // SV_ShutdownGameProgs (0x4489a0) -> G_ShutdownGame (0x4d9ce0)
 const char* const* CampaignBody()
 {
     static const char* const russian[] = {"xmodel/character_russian_trench_b", "xmodel/head_russian_winter_jon",
@@ -979,10 +980,10 @@ void CopyLoadout(int n)
 
 // "carga este mapa y volve a entrar": al que se une desde otro mapa o el menu, y a los que el host ya no conoce
 // (cargo un punto de control o cambio de nivel)
-void SendRejoin(const sockaddr_in& to)
+void SendRejoin(const sockaddr_in& to, bool now = false)
 {
     static DWORD last;
-    if (GetTickCount() - last < 500) return;
+    if (!now && GetTickCount() - last < 500) return;
     last = GetTickCount();
     Packet p(M_REJOIN);
     const char* map = MapName();
@@ -1477,8 +1478,20 @@ void JoinerLost(const char* why)
     if (inLevel) Cbuf_AddText("disconnect\n");
 }
 
+// Los comandos del host llevan la numeracion de su cliente local: bloque +4 el ultimo, +8 el anterior al bloque. El
+// cliente de aca guarda el ultimo recibido (0x61569c) y el cgame el ultimo ejecutado (0xf5bd14), en un anillo de 256.
+// Si no siguen a lo que llego antes (recien entra, el host volvio a un punto de control, se perdio un bloque), el cgame
+// pedia numeros que nunca llegaron: "CL_GetServerCommand: a reliable command was cycled out" y vuelta al menu. Se
+// sigue desde el anterior al bloque.
+constexpr uintptr_t CL_CMD_SEQ = 0x61569c, CG_CMD_SEQ = 0xf5bd14;
 void DeliverCommands(uint8_t* block)
 {
+    int seq = *(int*)(block + 4), prev = *(int*)(block + 8);
+    int &clSeq = *(int*)CL_CMD_SEQ, &cgSeq = *(int*)CG_CMD_SEQ;
+    if (clSeq < prev || clSeq > seq || cgSeq > seq || cgSeq <= seq - 256) {
+        Log("joiner: comandos del host desde %d (aca iba en %d/%d)", prev + 1, clSeq, cgSeq);
+        clSeq = cgSeq = prev;
+    }
     uintptr_t f = CL_DELIVER_COMMANDS;
     asm volatile("call *%%eax" : "+b"(block), "+a"(f) : : "ecx", "edx", "esi", "edi", "memory");
 }
@@ -1603,12 +1616,36 @@ extern "C" void __cdecl Cod2_LocalThink()
     ClientThink(0);
 }
 
+// Bloque: +0 largo del texto, +4 ultimo comando, +8 el anterior al bloque, +0xc texto, +0x200c posicion de cada
+// comando en el texto (anillo de 256). Si el bloque anterior todavia se esta mandando, los comandos nuevos se le
+// agregan: si no, el que se une se perdia los de ese frame.
+bool AppendCommands(const uint8_t* block)
+{
+    int prev = *(const int*)(block + 8), seq = *(const int*)(block + 4);
+    if (prev != *(int*)(g_block + 4)) return false;
+    int& len = *(int*)g_block;
+    const int* from = (const int*)(block + BLOCK_OFFSETS);
+    int* to = (int*)(g_block + BLOCK_OFFSETS);
+    for (int i = prev + 1; i <= seq; ++i) {
+        int at = from[i & 0xff], room = BLOCK_OFFSETS - BLOCK_TEXT;
+        if (at < 0 || at >= room) return false;
+        const char* text = (const char*)block + BLOCK_TEXT + at;
+        int n = (int)strnlen(text, room - at) + 1;
+        if (len + n > room) return false;
+        memcpy(g_block + BLOCK_TEXT + len, text, n);
+        to[i & 0xff] = len;
+        len += n;
+    }
+    *(int*)(g_block + 4) = seq;
+    return true;
+}
+
 // SV_FinishFrame, antes de pasarle al cliente local los comandos del servidor (EBX = bloque). Devuelve el bloque a
 // pasar o 0 para no pasar nada.
 extern "C" uint8_t* __cdecl Cod2_Reliable(uint8_t* block)
 {
     if (g_role == HOST && *(int*)(block + 4) != *(int*)(block + 8)) {  // comandos nuevos este frame
-        memcpy(g_block, block, BLOCK_SIZE);
+        if (g_blockSends <= 0 || !AppendCommands(block)) memcpy(g_block, block, BLOCK_SIZE);
         g_blockSends = 3;
     }
     if (g_role == JOINER && g_joined) return nullptr;  // los del juego local no; los del host en Cod2_Snapshot
@@ -1827,6 +1864,13 @@ _Cod2_PrecacheEndStub:
     mov dword ptr [0x9ff014], esi
     mov dword ptr [0x1c60528], esi
     ret
+.globl _Cod2_ShutdownGameStub
+_Cod2_ShutdownGameStub:
+    pushad
+    call _Cod2_ShutdownGame
+    popad
+    push 0x4d9ce0
+    ret
 .globl _Cod2_CgameSnapStub
 _Cod2_CgameSnapStub:
     push dword ptr [esp+8]
@@ -1869,8 +1913,22 @@ extern "C" void Cod2_ReliableStub();
 extern "C" void Cod2_SnapshotStub();
 extern "C" void Cod2_CgameSnapStub();
 extern "C" void Cod2_PrecacheEndStub();
+extern "C" void Cod2_ShutdownGameStub();
 extern "C" void Cod2_NoDObjBounds();
 extern "C" void Cod2_GetEntMatch();
+
+// Antes de G_ShutdownGame (cambio de nivel, punto de control, error, salir): la memoria de los scripts sigue entre
+// niveles, asi que los arboles armados aca (cuerpos en el host, DObj copiados del host en el que se une) se sueltan
+// mientras sus XAnim siguen validos. Sin esto se perdian en cada nivel y en el segundo mapa el que se une se quedaba
+// sin memoria ("failed memory allocation for script usage").
+extern "C" void __cdecl Cod2_ShutdownGame()
+{
+    int freed = 0;
+    for (int e = 0; e < MAX_ENTS; ++e)
+        if (g_ownTree[e]) FreeClientDObj(e), ++freed;
+    for (auto& t : g_bodyTree) t = nullptr;
+    if (freed) Log("fin del nivel: %d arboles propios liberados", freed);
+}
 
 // Llamado desde G_InitGame: level.clients pasa a un arreglo de 4 y las entidades 0..3 quedan para jugadores.
 extern "C" void __cdecl Cod2_SetupClients()
@@ -1882,7 +1940,14 @@ extern "C" void __cdecl Cod2_SetupClients()
     for (int n = 0; n < MAX_CLIENTS; ++n) *(uint8_t**)(Entity(n) + GE_CLIENT) = GClient(n);
     *(int*)LEVEL_NUM_ENTITIES = MAX_CLIENTS;
     *(int*)SV_GENTITIES_NUM = MAX_CLIENTS;
-    for (auto& r : g_remote) r.active = false;  // mapa nuevo: los remotos vuelven a entrar
+    // mapa nuevo: los remotos vuelven a entrar. Se les avisa ya: hasta el "clic para empezar" el host no atiende la red
+    // y, sin noticias en 20 s, el que se une se daria por desconectado.
+    for (int n = 1; n < MAX_CLIENTS; ++n) {
+        if (!g_remote[n].active) continue;
+        if (g_role == HOST) SendRejoin(g_remote[n].addr, true);
+        Log("host: jugador %d, que cargue %s", n + 1, MapName());
+    }
+    for (auto& r : g_remote) r.active = false;
     for (int n = 0; n < MAX_CLIENTS; ++n) g_bodyTree[n] = nullptr, g_bodyAnim[n] = -1;  // las tablas de DObj se vacian
     memset(g_ownTree, 0, sizeof g_ownTree);
     memset(g_downed, 0, sizeof g_downed);
@@ -1962,6 +2027,8 @@ void Install()
     if (Expect(0x42edea, "\xe8\xb1\x02\x02\x00", 5)) CallTo(0x42edea, (void*)Cod2_ComFrameStub, 5);  // Com_Frame
     if (Expect(PRECACHE_END, "\x89\x35\x14\xf0\x9f\x00\x89\x35\x28\x05\xc6\x01", 12))
         CallTo(PRECACHE_END, (void*)Cod2_PrecacheEndStub, 12);  // fin de la precarga del nivel
+    if (Expect(SHUTDOWN_GAME_CALL, "\xe8\x2a\x13\x09\x00", 5))
+        CallTo(SHUTDOWN_GAME_CALL, (void*)Cod2_ShutdownGameStub, 5);  // SV_ShutdownGameProgs -> G_ShutdownGame
     // En el que se une la tabla de DObj es la del host, pero los trazos del movimiento local (ClientThink) cruzan las
     // entidades de su propio nivel congelado: los limites del DObj de una entidad (0x4481c0, EAX = entidad, EDX/ECX =
     // min/max) leen sin mirar si hay DObj y el juego se caia (0x4481e1) cuando el host ya no tenia esa entidad. Sin DObj:
