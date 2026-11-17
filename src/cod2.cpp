@@ -112,17 +112,40 @@ uint8_t* GClient(int n) { return g_clients + n * GCLIENT_SIZE; }
 // Los jugadores tienen CONTENTS_BODY (ent+0xc0) y el clipmask del Pmove lo incluye: dos jugadores en el mismo lugar
 // (el remoto aparece donde esta el host) quedaban trabados. Mientras uno se mueve, los demas jugadores no son solidos.
 constexpr int GE_CONTENTS = 0xc0;
+uint32_t g_thinkContents[MAX_CLIENTS];  // los de los demas mientras uno piensa (para los disparos con fuego amigo)
+int g_thinking = -1;
 void ClientThink(int n)
 {
-    uint32_t saved[MAX_CLIENTS];
+    uint32_t* saved = g_thinkContents;
     for (int i = 0; i < MAX_CLIENTS; ++i) {
         saved[i] = *(uint32_t*)(Entity(i) + GE_CONTENTS);
         if (i != n) *(uint32_t*)(Entity(i) + GE_CONTENTS) = 0;
     }
+    g_thinking = n;
     int num = n;
     asm volatile("call *%1" : "+a"(num) : "r"(CLIENT_THINK) : "ecx", "edx", "memory");
+    g_thinking = -1;
     for (int i = 0; i < MAX_CLIENTS; ++i)
         if (i != n) *(uint32_t*)(Entity(i) + GE_CONTENTS) = saved[i];
+}
+
+// Las balas (Bullet_Fire_Extended 0x531340) trazan con 0x44bf00 en 0x5313db, dentro del ClientThink del que dispara,
+// cuando los demas jugadores no son solidos: con fuego amigo, durante esa traza vuelven a serlo.
+bool FriendlyFire();
+bool g_shotSolid;
+extern "C" void __cdecl Cod2_ShotBegin()
+{
+    if (g_thinking < 0 || !FriendlyFire()) return;
+    for (int i = 0; i < MAX_CLIENTS; ++i)
+        if (i != g_thinking) *(uint32_t*)(Entity(i) + GE_CONTENTS) = g_thinkContents[i];
+    g_shotSolid = true;
+}
+extern "C" void __cdecl Cod2_ShotEnd()
+{
+    if (!g_shotSolid) return;
+    for (int i = 0; i < MAX_CLIENTS; ++i)
+        if (i != g_thinking) *(uint32_t*)(Entity(i) + GE_CONTENTS) = 0;
+    g_shotSolid = false;
 }
 void ClientBegin(int n) { asm volatile("call *%1" : "+a"(n) : "r"(CLIENT_BEGIN) : "ecx", "edx", "memory"); }
 
@@ -412,7 +435,7 @@ uint8_t* CreateTree(uint8_t* xanim)
     return tree;
 }
 
-void CreateClientDObj(int e, const void* models, int count, uint8_t* tree)
+__attribute__((noinline)) void CreateClientDObj(int e, const void* models, int count, uint8_t* tree)  // asm sin registros libres si se inlinea
 {
     int ent = e;
     asm volatile("push %3\n\tpush %2\n\tpush %1\n\tcall *%4\n\tadd $12, %%esp"
@@ -867,6 +890,15 @@ void SetDowned(int n, bool down)
     Announce(down, text);
 }
 
+// Dano entre jugadores: opcion del host (dvar coop2_friendlyfire, boton del menu Co-op). Lo crea "seta" como
+// texto: el valor en +8 es el string.
+bool FriendlyFire()
+{
+    uint8_t* d = Dvar_FindVar("coop2_friendlyfire");
+    const char* v = d ? *(const char**)(d + 8) : nullptr;
+    return v && !IsBadReadPtr(v, 2) && atoi(v) != 0;
+}
+
 extern "C" void __cdecl Cod2_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, float* dir, float* point,
                                      int damage, int dflags, int mod, int part)
 {
@@ -876,7 +908,7 @@ extern "C" void __cdecl Cod2_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t*
         return;
     }
     int a = PlayerOf(attacker);
-    if (a >= 0 && a != n) return;  // un jugador no lastima a otro (a si mismo si, como en el SP)
+    if (a >= 0 && a != n && !FriendlyFire()) return;  // sin fuego amigo un jugador no lastima a otro (a si mismo si)
     if (g_downed[n]) return;       // caido: ya no recibe dano
     // El dano final depende de la parte del cuerpo y la dificultad (G_Damage lo escala): se aplica con la vida
     // inflada para que no muera adentro, se mide cuanto bajo y recien ahi se decide entre herido, caido o muerto.
@@ -1587,6 +1619,7 @@ void Cmd_Join()
 }  // namespace
 
 // ---------- ganchos ----------
+DWORD g_joinerSent;  // joiner: ultimo paquete al host (usercmd o M_PING)
 // El cliente local llama a ClientThink(0) directo (0x409f76) con el usercmd ya copiado en svs.clients[0]: el que se
 // une no lo aplica en su juego (congelado), se lo manda al host.
 extern "C" void __cdecl Cod2_LocalThink()
@@ -1602,6 +1635,7 @@ extern "C" void __cdecl Cod2_LocalThink()
         Packet p(M_CMD);
         p.Put(cmd, USERCMD_SIZE);
         p.Send(g_host);
+        g_joinerSent = GetTickCount();
         static DWORD lastLog;
         static int count;
         ++count;
@@ -1696,6 +1730,10 @@ extern "C" int __cdecl Cod2_Snapshot()
             JoinerLost("Lost the connection to the host.");
             return 1;
         }
+        if (GetTickCount() - g_joinerSent > 1000) {  // con un menu abierto el cliente no genera usercmds
+            Packet(M_PING).Send(g_host);
+            g_joinerSent = GetTickCount();
+        }
         if (g_rxBlockNew) {
             g_rxBlockNew = false;
             DeliverCommands(g_rxBlock);
@@ -1741,6 +1779,46 @@ void RegisterCommands()
     Cmd_AddCommand("coop2hurt", Cmd_Hurt);
     Cmd_AddCommand("coop2save", Cmd_Save);
     if (!Dvar_FindVar("coop2_ip")) Cbuf_AddText("seta coop2_ip \"\"\n");
+    if (!Dvar_FindVar("coop2_friendlyfire")) Cbuf_AddText("seta coop2_friendlyfire 0\n");
+}
+
+// El menu de pausa (ESC: UI_SetActiveMenu pone cl_paused 1 en 0x4c669b y abre "main") congela el servidor local
+// (SV_Frame 0x44a9d0 no corre con cl_paused): en el host eso paraba a todos, y en el que se une dejaba de procesar
+// los snapshots del host. Ademas cada frame (0x44ab70) pone cl_paused 1 si hay un menu en pantalla completa (0x4cf6a0,
+// salto en 0x44ab93). En coop el menu no pausa, como en multijugador; la pantalla de inicio ("pregame", 0x4c66ef) pone
+// cl_paused 1 por su cuenta y sigue pausando. main.menu elige los botones de partida en curso con cl_paused: el de
+// zz_coop2.iwd mira ui_coop2_paused (cl_paused, o en coop "hay un nivel corriendo").
+constexpr uintptr_t MENU_PAUSE_PUSH = 0x4c669b, UI_PAUSE_CHECK = 0x44ab93;  // push 1 (cl_paused) / jne 0x44aba3
+constexpr uintptr_t CL_PAUSED = 0x747ef4;
+void MenuPause()
+{
+    static bool ok = !memcmp((void*)MENU_PAUSE_PUSH, "\x6a\x01\x68\x2c\x12\x57\x00", 7) &&
+                     !memcmp((void*)UI_PAUSE_CHECK, "\x75\x0e", 2);
+    bool coop = (g_role == HOST && AnyRemote()) || (g_role == JOINER && g_joined);
+    const uint8_t push[2] = {0x6a, uint8_t(coop ? 0 : 1)};
+    if (ok && memcmp((void*)MENU_PAUSE_PUSH, push, 2)) {
+        hook::Write(MENU_PAUSE_PUSH, push, 2);
+        hook::Write(UI_PAUSE_CHECK, coop ? "\x90\x90" : "\x75\x0e", 2);
+        Log("menu de pausa: %s", coop ? "no pausa (coop)" : "pausa como en el SP");
+    }
+    // El SP va paso a paso: SV_Frame corre un frame y espera ([0x81500c]) a que el cgame lo tome (0x44a900, desde
+    // CG_DrawActiveFrame 0x4b0040 al dibujar la escena). Con un menu en pantalla completa no se dibuja la escena y
+    // el nivel quedaba quieto aunque cl_paused fuera 0: en coop se lo avanza como 0x4a4c70 (0x44a900 y, si hubo
+    // snapshot, el cgame lo procesa), sin dibujar.
+    if (coop && *(int*)0x81500c) {
+        int full;
+        uintptr_t ui = 0x10fec30;  // UI_IsFullscreen (0x4cf6a0, ECX = contexto de la UI)
+        asm volatile("call *%2" : "=a"(full), "+c"(ui) : "r"((uintptr_t)0x4cf6a0) : "edx", "memory");
+        if (full) asm volatile("call *%0" : : "r"((uintptr_t)0x4a4c70) : "eax", "ecx", "edx", "memory");
+    }
+    uint8_t* clPaused = *(uint8_t**)CL_PAUSED;
+    uint8_t* svRunning = Dvar_FindVar("sv_running");
+    int paused = (clPaused && clPaused[8]) || (coop && svRunning && svRunning[8]);
+    static int last = -1;
+    if (paused != last) {
+        Cbuf_AddText(paused ? "set ui_coop2_paused 1\n" : "set ui_coop2_paused 0\n");
+        last = paused;
+    }
 }
 
 // Com_Frame (0x42ed20), en cada frame del juego: sin nivel corriendo (menu, carga) Cod2_Snapshot no se llama; el que
@@ -1748,6 +1826,7 @@ void RegisterCommands()
 extern "C" void __cdecl Cod2_ComFrame()
 {
     RegisterCommands();  // coop2join tambien desde el menu principal
+    MenuPause();
     if (GetTickCount() - g_lastLevelFrame < 500) return;  // en un nivel atiende Cod2_Snapshot
     PollCommandFile();
     static DWORD lastPing;
@@ -1864,6 +1943,22 @@ _Cod2_PrecacheEndStub:
     mov dword ptr [0x9ff014], esi
     mov dword ptr [0x1c60528], esi
     ret
+.data
+_g_shotRet: .long 0
+.text
+.globl _Cod2_ShotTraceStub
+_Cod2_ShotTraceStub:
+    pushad
+    call _Cod2_ShotBegin
+    popad
+    pop dword ptr [_g_shotRet]
+    mov eax, 0x44bf00
+    call eax
+    pushad
+    call _Cod2_ShotEnd
+    popad
+    push dword ptr [_g_shotRet]
+    ret
 .globl _Cod2_ShutdownGameStub
 _Cod2_ShutdownGameStub:
     pushad
@@ -1914,6 +2009,7 @@ extern "C" void Cod2_SnapshotStub();
 extern "C" void Cod2_CgameSnapStub();
 extern "C" void Cod2_PrecacheEndStub();
 extern "C" void Cod2_ShutdownGameStub();
+extern "C" void Cod2_ShotTraceStub();
 extern "C" void Cod2_NoDObjBounds();
 extern "C" void Cod2_GetEntMatch();
 
@@ -2027,6 +2123,15 @@ void Install()
     if (Expect(0x42edea, "\xe8\xb1\x02\x02\x00", 5)) CallTo(0x42edea, (void*)Cod2_ComFrameStub, 5);  // Com_Frame
     if (Expect(PRECACHE_END, "\x89\x35\x14\xf0\x9f\x00\x89\x35\x28\x05\xc6\x01", 12))
         CallTo(PRECACHE_END, (void*)Cod2_PrecacheEndStub, 12);  // fin de la precarga del nivel
+    // ingameopen / ingameclose (scripts de menu: ESC en el menu de pausa) miran cl_paused por nombre: en coop el menu
+    // no pausa, asi que miran ui_coop2_paused (fuera de coop vale lo mismo que cl_paused, ver MenuPause)
+    static const char kUiPaused[] = "ui_coop2_paused";
+    for (uintptr_t at : {(uintptr_t)0x4c82b4, (uintptr_t)0x4c8344})
+        if (Expect(at, "\x68\x2c\x12\x57\x00", 5)) {
+            uint32_t p = (uint32_t)(uintptr_t)kUiPaused;
+            hook::Write(at + 1, &p, 4);
+        }
+    if (Expect(0x5313db, "\xe8\x20\xab\xf1\xff", 5)) CallTo(0x5313db, (void*)Cod2_ShotTraceStub, 5);  // traza de las balas
     if (Expect(SHUTDOWN_GAME_CALL, "\xe8\x2a\x13\x09\x00", 5))
         CallTo(SHUTDOWN_GAME_CALL, (void*)Cod2_ShutdownGameStub, 5);  // SV_ShutdownGameProgs -> G_ShutdownGame
     // En el que se une la tabla de DObj es la del host, pero los trazos del movimiento local (ClientThink) cruzan las

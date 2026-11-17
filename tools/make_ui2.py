@@ -8,7 +8,10 @@ main_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(root, 'game2', 'ma
 read = lambda name: open(os.path.join(root, 'ui', name), encoding='utf-8').read()
 
 with zipfile.ZipFile(os.path.join(main_dir, 'iw_06.iwd')) as z:
-    lines = z.read('ui/main.menu').decode('latin-1').split('\n')
+    text = z.read('ui/main.menu').decode('latin-1')
+# en coop el menu de pausa no pone cl_paused: los botones de partida en curso miran ui_coop2_paused (lo pone el mod)
+text = re.sub(r'(?i)(dvartest\s+)"cl_paused"', r'\1"ui_coop2_paused"', text)
+lines = text.split('\n')
 
 # en el menu "main_text" (hasta el siguiente menuDef) lo que esta de Multijugador para abajo baja 30 px
 start = next(i for i, l in enumerate(lines) if re.match(r'\s*name\s+main_text\s*$', l))

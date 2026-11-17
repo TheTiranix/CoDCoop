@@ -33,7 +33,7 @@ switch ($What) {
   }
   'key' {
     $ps = Games; $p = if ($A3 -eq 'host') { $ps[0] } else { $ps[-1] }
-    $named = @{ LEFT = 0x25; UP = 0x26; RIGHT = 0x27; DOWN = 0x28; SPACE = 0x20 }
+    $named = @{ LEFT = 0x25; UP = 0x26; RIGHT = 0x27; DOWN = 0x28; SPACE = 0x20; ESC = 0x1B; ENTER = 0x0D; TAB = 0x09 }
     $vk = if ($named.ContainsKey($A2.ToUpper())) { $named[$A2.ToUpper()] } else { [int][char]$A2.ToUpper() }
     $sc = [R2]::MapVirtualKey($vk, 0); $ext = if ($vk -ge 0x25 -and $vk -le 0x28) { 0x1000000 } else { 0 }
     $l = [IntPtr](1 -bor ($sc -shl 16) -bor $ext)

@@ -117,6 +117,27 @@
 			action { play "mouse_click"; exec "coop2join"; }
 			mouseEnter { play "mouse_over"; }
 		}
+		// dano entre jugadores: lo decide el anfitrion (coop2_friendlyfire)
+		itemDef
+		{
+			name		friendlyfire
+			type		ITEM_TYPE_YESNO
+			text		"Friendly fire: "
+			dvar		"coop2_friendlyfire"
+			rect		30 150 215 20
+			style		1
+			border		1
+			bordercolor	.5 .5 .5 .5
+			textalign	ITEM_ALIGN_LEFT
+			textalignx	6
+			textaligny	15
+			textscale	.25
+			backcolor	0 0 0 .4
+			forecolor	.9 .9 .9 1
+			visible		1
+			action { play "mouse_click"; }
+			mouseEnter { play "mouse_over"; }
+		}
 		// salir de la partida (el que se une vuelve al menu; el host deja de crear partida)
 		itemDef
 		{
@@ -127,7 +148,7 @@
 			style		UI_BUTTON_STYLE
 			textfont	UI_FONT_NORMAL
 			textstyle	ITEM_TEXTSTYLE_SHADOWED
-			rect		60 150 155 22
+			rect		60 175 155 22
 			textalign	1
 			textalignx	77
 			textaligny	17
@@ -145,7 +166,7 @@
 			style		UI_BUTTON_STYLE
 			textfont	UI_FONT_NORMAL
 			textstyle	ITEM_TEXTSTYLE_SHADOWED
-			rect		60 176 155 22
+			rect		60 199 155 22
 			textalign	1
 			textalignx	77
 			textaligny	17
@@ -159,7 +180,7 @@
 		itemDef
 		{
 			name		status
-			rect		15 205 245 45
+			rect		15 225 245 42
 			type		ITEM_TYPE_TEXT
 			style		0
 			textstyle	ITEM_TEXTSTYLE_SHADOWED
