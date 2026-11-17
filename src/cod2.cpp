@@ -9,10 +9,12 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <initializer_list>
 #include "hook.h"
+#include "steam.h"
 
 namespace {
 constexpr int MAX_CLIENTS = 4;
@@ -159,12 +161,15 @@ enum : uint8_t { M_JOIN = 'J', M_ACCEPT = 'A', M_FULL = 'F', M_CMD = 'C', M_SNAP
 constexpr DWORD REMOTE_TIMEOUT = 15000, HOST_TIMEOUT = 20000;
 enum Role { NONE, HOST, JOINER } g_role;
 SOCKET g_sock = INVALID_SOCKET;
+// Steam (src/steam.h, el mismo de CoD1): cada amigo es una direccion falsa 0.83.84.n:480 en el resto del mod
+uint64_t g_steamPeer[steam::MAX_PEERS];
 
 struct Remote {
     bool active;
     sockaddr_in addr;
 } g_remote[MAX_CLIENTS];
 DWORD g_joinedAt[MAX_CLIENTS];  // host: cuando entro cada remoto
+int g_squadRuns[MAX_CLIENTS];   // host: 1 si ya se corrio addPlayerToSquad sobre el remoto (HostSquads)
 DWORD g_lastHeard[MAX_CLIENTS];  // host: ultimo paquete de cada remoto
 DWORD g_hostHeard;               // joiner: ultimo paquete del host
 DWORD g_levelStart;              // host: G_InitGame (nivel nuevo o partida cargada)
@@ -173,6 +178,7 @@ float g_reviveTime[MAX_CLIENTS]; // host: segundos que un companero lleva levant
 
 sockaddr_in g_host;
 bool g_joined;
+bool g_staleLevel;  // joiner: el nivel local perdio sus DObj al entrar (no se corre hasta cargar otro)
 DWORD g_lastLevelFrame;  // ultimo frame con nivel corriendo (Cod2_Snapshot)
 DWORD g_mapLoadSince;  // joiner: cargando el mapa del host (no pide entrar hasta G_InitGame)
 int g_slot;
@@ -225,7 +231,11 @@ struct Packet {
         len += n;
     }
     template <class T> void Put(const T& v) { Put(&v, sizeof v); }
-    void Send(const sockaddr_in& to) const { sendto(g_sock, (const char*)buf, len, 0, (const sockaddr*)&to, sizeof to); }
+    void Send(const sockaddr_in& to) const
+    {
+        if (steam::IsAddr(to)) steam::Send(steam::IdOf(g_steamPeer, to), buf, len);
+        else sendto(g_sock, (const char*)buf, len, 0, (const sockaddr*)&to, sizeof to);
+    }
 };
 
 bool SameAddr(const sockaddr_in& a, const sockaddr_in& b) { return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port; }
@@ -242,7 +252,6 @@ constexpr uintptr_t DOBJ_INDEX = 0x74a980, DOBJ_POOL = 0x74c200, G_MODELS = 0x1b
 constexpr int DOBJ_SIZE = 100, INFO_SIZE = 0x28, INFO_STATE = 0xc, INFO_STATE_SIZE = 0x1c, MAX_ENTS = 1024, MAX_MODELS_PER = 8;
 constexpr uintptr_t CL_DOBJ_CREATE = 0x42f630;     // cdecl (modelos {XModel*, tag, sin colision}[], cantidad, arbol), EAX = entidad
 constexpr uintptr_t CL_DOBJ_FREE = 0x42f760;       // ECX = entidad
-constexpr uintptr_t XANIM_CREATE_TREE = 0x42f280;  // EBX = XAnim -> arbol
 constexpr uintptr_t XANIM_ALLOC_INFO = 0x478830;   // ESI = arbol, cdecl (nodo) -> info
 enum : uint8_t { M_DOBJ = 'D', M_ANIM = 'N', M_ENTS = 'E' };
 
@@ -401,11 +410,9 @@ void JoinerApplyEntities(const uint8_t* p, int len)
     }
 }
 
-// Los arboles de animacion salen de la memoria de los scripts (XAnimCreateTree 0x42f280 pide 5 * nodos + 9 bytes a
-// MT_AllocIndex). Como G_FreeEntity (0x4d7d41..0x4d7d77): XAnimClearTree 0x478db0 (arbol, 0), XAnimFreeTree 0x478e10
-// (arbol) y MT_Free 0x45ee80 (arbol, tamano). Sin esto cada DObj rearmado dejaba su arbol (5 KB un soldado) y en
-// niveles con muchos soldados (duhoc_assault) el que se une se quedaba sin memoria en un minuto ("failed memory
-// allocation for script usage"). Solo los arboles armados aca: los de las entidades del juego (ent+0x1f4) los suelta el.
+// Los arboles de las entidades del juego (ent+0x1f4) salen de la memoria de los scripts (XAnimCreateTree 0x42f280 pide
+// 5 * nodos + 9 bytes a MT_AllocIndex). Se sueltan como G_FreeEntity (0x4d7d41..0x4d7d77): XAnimClearTree 0x478db0
+// (arbol, 0), XAnimFreeTree 0x478e10 (arbol) y MT_Free 0x45ee80 (arbol, tamano).
 constexpr int GE_TREE = 0x1f4;
 uint8_t* g_ownTree[MAX_ENTS];
 void FreeTree(uint8_t* tree)
@@ -416,23 +423,34 @@ void FreeTree(uint8_t* tree)
     ((void(__cdecl*)(uint8_t*, int))0x45ee80)(tree, size);
 }
 
+// Los arboles armados aca (cuerpos en el host, DObj copiados del host en el que se une) van al heap y no a la memoria
+// de los scripts: XAnimCreateTree 0x42f280 solo pide 5 * nodos + 9 bytes en cero con el XAnim al principio, y los
+// soldados del juego tampoco usan esa memoria para sus arboles. Con ~50 soldados copiados (5 KB cada uno) el que se
+// une llegaba al 80% de esa memoria en decoytown y se quedaba sin ella en niveles grandes (hill400_defend).
+uint8_t* CreateTree(uint8_t* xanim)
+{
+    uint8_t* tree = (uint8_t*)calloc(1, *(int*)(xanim + 4) * 5 + 9);
+    if (tree) *(uint8_t**)tree = xanim;
+    return tree;
+}
+
+void FreeOwnTree(uint8_t* tree)
+{
+    ((void(__cdecl*)(uint8_t*, int))0x478db0)(tree, 0);
+    ((void(__cdecl*)(uint8_t*))0x478e10)(tree);
+    free(tree);
+}
+
 void FreeClientDObj(int e)
 {
     uint8_t* d = ClientDObj(e);
     uint8_t* tree = d ? *(uint8_t**)d : nullptr;
-    if (tree && tree == g_ownTree[e]) FreeTree(tree);
+    if (tree && tree == g_ownTree[e]) FreeOwnTree(tree);
     g_ownTree[e] = nullptr;
     int ent = e;
     g_ourFree = true;
     asm volatile("call *%1" : "+c"(ent) : "r"(CL_DOBJ_FREE) : "eax", "edx", "memory");
     g_ourFree = false;
-}
-
-uint8_t* CreateTree(uint8_t* xanim)
-{
-    uint8_t* tree;
-    asm volatile("call *%2" : "=a"(tree), "+b"(xanim) : "r"(XANIM_CREATE_TREE) : "ecx", "edx", "memory");
-    return tree;
 }
 
 __attribute__((noinline)) void CreateClientDObj(int e, const void* models, int count, uint8_t* tree)  // asm sin registros libres si se inlinea
@@ -475,7 +493,7 @@ void JoinerApplyDObjs(const uint8_t* p, int len)
             uint8_t* tree = xanim ? CreateTree(xanim) : nullptr;
             CreateClientDObj(e, models, nm, tree);
             d = ClientDObj(e);
-            if (tree && !d) FreeTree(tree);
+            if (tree && !d) FreeOwnTree(tree);
             g_ownTree[e] = d ? tree : nullptr;
             static int created;
             if (created++ < 20) Log("joiner: DObj %d con %d modelos (arbol %p)", e, nm, (void*)tree);
@@ -1057,6 +1075,7 @@ void HostJoin(const sockaddr_in& from, const uint8_t* body, int len)
         }
         g_remote[n] = {true, from};
         g_joinedAt[n] = g_lastHeard[n] = GetTickCount();
+        g_squadRuns[n] = 0;
         memset(g_dobjSig[n], 0xff, sizeof g_dobjSig[n]);  // la primera vez va todo, incluso "sin DObj"
         memset(g_entKnown[n], 0, sizeof g_entKnown[n]);
         *(uint8_t**)(Client(n) + CL_GENTITY) = Entity(n);
@@ -1438,13 +1457,17 @@ void JoinerLost(const char* why);
 
 void Poll()
 {
-    if (g_sock == INVALID_SOCKET) return;
+    if (g_sock == INVALID_SOCKET && !steam::up) return;
     static uint8_t buf[SNAP_MAX + BLOCK_SIZE + 64];
     for (;;) {
         sockaddr_in from;
         int fl = sizeof from;
-        int len = recvfrom(g_sock, (char*)buf, sizeof buf, 0, (sockaddr*)&from, &fl);
-        if (len < 5) break;
+        int len = g_sock != INVALID_SOCKET ? recvfrom(g_sock, (char*)buf, sizeof buf, 0, (sockaddr*)&from, &fl) : -1;
+        if (len < 5) {  // nada por UDP: lo que llego por Steam
+            uint64_t id;
+            if ((len = steam::Recv(buf, sizeof buf, &id)) < 5) break;
+            from = steam::Addr(g_steamPeer, id);
+        }
         if (*(uint32_t*)buf != MAGIC) continue;
         uint8_t type = buf[4];
         const uint8_t* body = buf + 5;
@@ -1474,6 +1497,7 @@ void Poll()
                     uint8_t*& tree = *(uint8_t**)(Entity(e) + GE_TREE);  // queda en 0: G_FreeEntity no lo suelta de nuevo
                     if (Entity(e)[GE_INUSE] && tree) FreeTree(tree), tree = nullptr, ++trees;
                 }
+                g_staleLevel = true;
                 Log("joiner: el host me acepto como jugador %d (nivel local: %d DObj y %d arboles liberados)", g_slot + 1,
                     freed, trees);
                 Status("Connected to the host as player %d.", g_slot + 1);
@@ -1565,7 +1589,8 @@ void Cmd_Host()
     }
     g_role = HOST;
     Log("host: esperando jugadores en el puerto %d", PORT);
-    Status("Hosting on UDP port %d. Start or load a mission; the others join with your IP.", PORT);
+    Status("Hosting on UDP port %d. Start or load a mission; the others join with your IP%s.", PORT,
+           steam::up ? " or through Steam" : "");
 }
 
 // coop2leave: el que se une se va de la partida; el host deja de crear partida (los demas vuelven al menu)
@@ -1591,17 +1616,37 @@ void Cmd_Join()
     // coop2join <IP o nombre> (cmd_argc 0x6c0280, cmd_argv 0x6bb680, como los lee writeconfig 0x42ea40); sin
     // argumento, la del campo de la ventana Co-op (dvar coop2_ip)
     char ip[64] = "";
+    bool viaSteam = false;
     if (*(int*)0x6c0280 >= 2) {
         sscanf(((const char**)0x6bb680)[1], "%63s", ip);
-        char cmd[96];  // el campo de la ventana Co-op la recuerda
+        viaSteam = !_strnicmp(ip, "steam:", 6);
+        char cmd[96];  // el campo de la ventana Co-op la recuerda (las IP; un amigo de Steam no)
         snprintf(cmd, sizeof cmd, "seta coop2_ip \"%s\"\n", ip);
-        if (!strpbrk(ip, "\";")) Cbuf_AddText(cmd);
+        if (!viaSteam && !strpbrk(ip, "\";")) Cbuf_AddText(cmd);
     } else if (uint8_t* d = Dvar_FindVar("coop2_ip")) {
         const char* v = *(const char**)(d + 8);
         if (v) sscanf(v, "%63s", ip);
     }
     if (!ip[0]) {
         Status("Type the host's IP first.");
+        return;
+    }
+    if (viaSteam) {  // coop2join steam:<SteamID64>: los paquetes van por Steam (Packet::Send / Poll)
+        uint64_t id = _strtoui64(ip + 6, nullptr, 10);
+        if (!steam::Start() || !id) {
+            Status(steam::up ? "That Steam friend is not valid." : "Steam is not running.");
+            return;
+        }
+        OpenSocket(0);
+        g_host = steam::Addr(g_steamPeer, id);
+        char name[64];
+        steam::Latin1(steam::Name(id), name, sizeof name);
+        g_role = JOINER;
+        g_joined = false;
+        g_hostHeard = GetTickCount();
+        Log("joiner: uniendome por Steam a %s (%I64u)", name, id);
+        Status("Joining %s through Steam...", name);
+        JoinerSendJoin();
         return;
     }
     if (!OpenSocket(0)) return;
@@ -1623,6 +1668,77 @@ void Cmd_Join()
     Log("joiner: uniendome a %s:%d", ip, PORT);
     Status("Joining %s...", ip);
     JoinerSendJoin();
+}
+
+// Steam en cada frame: arranca (reintenta cada 10 s, Steam se puede abrir despues), atiende sus avisos ("Unirse a la
+// partida" desde la lista de amigos), anuncia al host (rich presence codcoop2=host; CoD1 usa codcoop) y arma la lista
+// de amigos que hostean para los botones "Join <nombre>" de la ventana Co-op (ui_coop2_steam1..3).
+constexpr int STEAM_BUTTONS = 3;
+uint64_t g_steamHosts[STEAM_BUTTONS];
+void OnSteamJoin(const char* connect)
+{
+    Log("steam: unirse desde la lista de amigos (%s)", connect);
+    if (!strncmp(connect, "+coop2join steam:", 17) && !strpbrk(connect, ";\"\n")) {
+        char cmd[96];
+        snprintf(cmd, sizeof cmd, "%s\n", connect + 1);
+        Cbuf_AddText(cmd);
+    }
+}
+void SteamFrame()
+{
+    static int said;  // 1 avisado que no hay Steam, 2 que esta listo
+    if (!steam::Start()) {
+        if (!said) {
+            Log("steam: no disponible (%s), solo por IP", steam::error);
+            Cbuf_AddText("set ui_coop2_steam \"Steam is closed: you can only join by IP.\"\n");
+            said = 1;
+        }
+        return;
+    }
+    if (said != 2) Log("steam: listo (%I64u)", steam::MyId()), said = 2;
+    steam::Poll(OnSteamJoin);
+    static DWORD last;
+    if (GetTickCount() - last < 2000) return;
+    last = GetTickCount();
+    static int presence = -1;
+    int hosting = g_role == HOST;
+    if (hosting != presence) {
+        char connect[64];
+        snprintf(connect, sizeof connect, "+coop2join steam:%I64u", steam::MyId());
+        steam::SetPresence("codcoop2", hosting ? "host" : "");
+        steam::SetPresence("connect", hosting ? connect : "");
+        steam::SetPresence("status", hosting ? "Hosting CoD2 Coop" : "");
+        presence = hosting;
+    }
+    uint64_t hosts[STEAM_BUTTONS] = {};
+    int count = 0;
+    steam::ForEachHost([&](uint64_t id) { if (count < STEAM_BUTTONS) hosts[count++] = id; }, "codcoop2");
+    static int shown = -1;
+    if (count != shown) {
+        Cbuf_AddText(count ? "set ui_coop2_steam \"Steam friends hosting a game:\"\n"
+                           : "set ui_coop2_steam \"Steam: none of your friends is hosting yet.\"\n");
+        shown = count;
+    }
+    for (int i = 0; i < STEAM_BUTTONS; ++i) {
+        if (hosts[i] == g_steamHosts[i]) continue;
+        g_steamHosts[i] = hosts[i];
+        char name[48] = "", cmd[128];
+        if (hosts[i]) steam::Latin1(steam::Name(hosts[i]), name, sizeof name);
+        for (char* c = name; *c; ++c)
+            if (*c == '"' || *c == ';') *c = '\'';
+        snprintf(cmd, sizeof cmd, "set ui_coop2_steam%d \"Join %s\"\nset ui_coop2_steamon%d %d\n", i + 1, name, i + 1,
+                 hosts[i] ? 1 : 0);
+        Cbuf_AddText(cmd);
+    }
+}
+// coop2joinsteam <1-3>: el boton "Join <nombre>" de la ventana Co-op
+void Cmd_JoinSteam()
+{
+    int i = *(int*)0x6c0280 >= 2 ? atoi(((const char**)0x6bb680)[1]) - 1 : -1;
+    if (i < 0 || i >= STEAM_BUTTONS || !g_steamHosts[i]) return;
+    char cmd[64];
+    snprintf(cmd, sizeof cmd, "coop2join steam:%I64u\n", g_steamHosts[i]);
+    Cbuf_AddText(cmd);
 }
 }  // namespace
 
@@ -1786,6 +1902,7 @@ void RegisterCommands()
     Cmd_AddCommand("coop2leave", Cmd_Leave);
     Cmd_AddCommand("coop2hurt", Cmd_Hurt);
     Cmd_AddCommand("coop2save", Cmd_Save);
+    Cmd_AddCommand("coop2joinsteam", Cmd_JoinSteam);
     if (!Dvar_FindVar("coop2_ip")) Cbuf_AddText("seta coop2_ip \"\"\n");
     if (!Dvar_FindVar("coop2_friendlyfire")) Cbuf_AddText("seta coop2_friendlyfire 0\n");
 }
@@ -1820,6 +1937,12 @@ void MenuPause()
         if (full) asm volatile("call *%0" : : "r"((uintptr_t)0x4a4c70) : "eax", "ecx", "edx", "memory");
     }
     uint8_t* clPaused = *(uint8_t**)CL_PAUSED;
+    // El que se une saltea solo "Haz clic para empezar" (pregame, UI_SetActiveMenu 6, ultimo menu en 0x1cbad74):
+    // hace lo mismo que el clic (uiScript playerstart -> UI_PlayerStart 0x4c54c0)
+    if (g_role == JOINER && g_joined && *(int*)0x1cbad74 == 6 && clPaused && clPaused[8]) {
+        ((void(__cdecl*)())0x4c54c0)();
+        Log("joiner: pantalla de inicio salteada");
+    }
     uint8_t* svRunning = Dvar_FindVar("sv_running");
     int paused = (clPaused && clPaused[8]) || (coop && svRunning && svRunning[8]);
     static int last = -1;
@@ -1857,6 +1980,7 @@ extern "C" void __cdecl Cod2_ComFrame()
     RegisterCommands();  // coop2join tambien desde el menu principal
     MenuPause();
     CompassFrame();
+    SteamFrame();
     if (GetTickCount() - g_lastLevelFrame < 500) return;  // en un nivel atiende Cod2_Snapshot
     PollCommandFile();
     static DWORD lastPing;
@@ -1885,6 +2009,54 @@ extern "C" void __cdecl Cod2_AfterSnapshot()
     if (g_role == HOST) PlayersAsBodies(false);
 }
 
+// Scripts: los remotos no pasan por animscripts/init.gsc (anim.player thread addPlayerToSquad): sin .squad,
+// battlechatter.gsc (linea 1321, enemy.squad.squadName) cortaba con "undefined is not a field object" cuando un
+// soldado tenia de enemigo a un remoto. Con los scripts del nivel todavia cargados (antes de Scr_EndLoadScripts,
+// llamada en 0x4eb551) se busca animscripts/squadmanager::addPlayerToSquad, y el host la corre una vez sobre cada
+// remoto (HostSquads).
+int g_squadHandle;
+extern "C" void __cdecl Cod2_BeforeEndLoadScripts()
+{
+    static const char file[] = "animscripts/squadmanager", label[] = "addPlayerToSquad";
+    g_squadHandle = 0;
+    if (!((int(__cdecl*)(const char*))0x45e060)(file)) return;  // Scr_LoadScript: ya cargado por animscripts/init
+    uintptr_t h = (uintptr_t)file;  // Scr_GetFunctionHandle 0x45dc30: EAX = archivo, cdecl (etiqueta)
+    asm volatile("push %1\n\tcall *%2\n\tadd $4, %%esp" : "+a"(h) : "r"(label), "r"((uintptr_t)0x45dc30)
+                 : "ecx", "edx", "memory");
+    g_squadHandle = (int)h;
+    Log("scripts: %s::%s = %d", file, label, g_squadHandle);
+}
+void RunEntThread(int ent, int handle)  // como 0x4f603e: Scr_ExecEntThreadNum 0x46db10 + Scr_FreeThread 0x464ea0
+{
+    if (!handle) return;
+    uintptr_t h = (uintptr_t)handle;
+    asm volatile("push $0\n\tpush $0\n\tpush %1\n\tcall *%2\n\tadd $12, %%esp" : "+a"(h) : "r"(ent), "r"((uintptr_t)0x46db10)
+                 : "ecx", "edx", "memory");
+    ((void(__cdecl*)(int))0x464ea0)((uint16_t)h);
+}
+// anim.squads lo arma animscripts/init::main con el primer soldado (eType 9) del nivel: antes de eso
+// addPlayerToSquad entraba en un bucle de errores (libya, 88ridge, duhoc_assault empiezan sin soldados). Se espera a
+// ver uno vivo 1 s. No sirve un .gsc propio que espere: las partidas guardadas comparan el tamano del codigo de los
+// scripts ("Save game saved with different script files", 0x4d9af3) y las del juego dejarian de cargar.
+constexpr uint8_t ET_ACTOR = 9;
+DWORD g_actorSince;  // host: desde cuando hay soldados en el nivel (0 = todavia ninguno; G_InitGame lo vuelve a 0)
+void HostSquads()
+{
+    bool pending = false;
+    for (int n = 1; n < MAX_CLIENTS; ++n) pending |= g_remote[n].active && !g_squadRuns[n];
+    if (!pending || !g_squadHandle) return;
+    DWORD now = GetTickCount();
+    for (int e = MAX_CLIENTS; e < MAX_ENTS && !g_actorSince; ++e)
+        if (Entity(e)[GE_INUSE] && Entity(e)[0] == ET_ACTOR) g_actorSince = now;
+    if (!g_actorSince || now - g_actorSince < 1000) return;
+    for (int n = 1; n < MAX_CLIENTS; ++n) {
+        if (!g_remote[n].active || g_squadRuns[n] || !PlayerIn(n) || now - g_joinedAt[n] < 5000) continue;
+        RunEntThread(n, g_squadHandle);
+        g_squadRuns[n] = 1;
+        Log("host: jugador %d agregado al squad de los scripts", n + 1);
+    }
+}
+
 // el que se une no corre su juego local
 int(__cdecl* g_runFrame)(int, int);
 extern "C" int __cdecl Cod2_RunFrame(int partial, int limit)
@@ -1895,7 +2067,12 @@ extern "C" int __cdecl Cod2_RunFrame(int partial, int limit)
         ((void(__cdecl*)())0x409ed0)();
         return 1;
     }
+    // El que se une libero los DObj y arboles de su nivel al entrar: ese nivel no vuelve a correr aunque deje de estar
+    // unido (aviso de cargar otro mapa, host perdido, Disconnect) hasta que cargue uno nuevo. Si corria, un actor
+    // pedia el tag de su DObj inexistente (0x4d7390 -> 0x447d30) y el juego se caia.
+    if (g_staleLevel) return 1;
     int r = g_runFrame(partial, limit);
+    if (g_role == HOST) HostSquads();
     for (int n = 1; n < MAX_CLIENTS; ++n)
         if (!Entity(n)[GE_INUSE]) FreeSentientsOf(n);  // lugar de jugador libre (tambien tras cargar una partida)
     static uint8_t* lastParent;  // para el log: a que esta enganchado el host (scripts de vehiculos y cinematicas)
@@ -1989,6 +2166,13 @@ _Cod2_ShotTraceStub:
     popad
     push dword ptr [_g_shotRet]
     ret
+.globl _Cod2_EndLoadScriptsStub
+_Cod2_EndLoadScriptsStub:
+    pushad
+    call _Cod2_BeforeEndLoadScripts
+    popad
+    push 0x45e280
+    ret
 .globl _Cod2_ShutdownGameStub
 _Cod2_ShutdownGameStub:
     pushad
@@ -2040,6 +2224,7 @@ extern "C" void Cod2_CgameSnapStub();
 extern "C" void Cod2_PrecacheEndStub();
 extern "C" void Cod2_ShutdownGameStub();
 extern "C" void Cod2_ShotTraceStub();
+extern "C" void Cod2_EndLoadScriptsStub();
 extern "C" void Cod2_NoDObjBounds();
 extern "C" void Cod2_GetEntMatch();
 
@@ -2079,7 +2264,9 @@ extern "C" void __cdecl Cod2_SetupClients()
     memset(g_downed, 0, sizeof g_downed);
     memset(g_rideParent, 0, sizeof g_rideParent);
     g_levelStart = GetTickCount();
+    g_actorSince = 0;
     g_joined = false;
+    g_staleLevel = false;
     g_mapLoadSince = 0;
     RegisterCommands();
     Log("G_InitGame: %d jugadores, level.clients en %p", MAX_CLIENTS, (void*)g_clients);
@@ -2162,6 +2349,8 @@ void Install()
             hook::Write(at + 1, &p, 4);
         }
     if (Expect(0x5313db, "\xe8\x20\xab\xf1\xff", 5)) CallTo(0x5313db, (void*)Cod2_ShotTraceStub, 5);  // traza de las balas
+    if (Expect(0x4eb551, "\xe8\x2a\x2d\xf7\xff", 5))
+        CallTo(0x4eb551, (void*)Cod2_EndLoadScriptsStub, 5);  // GScr_LoadScripts -> Scr_EndLoadScripts
     if (Expect(SHUTDOWN_GAME_CALL, "\xe8\x2a\x13\x09\x00", 5))
         CallTo(SHUTDOWN_GAME_CALL, (void*)Cod2_ShutdownGameStub, 5);  // SV_ShutdownGameProgs -> G_ShutdownGame
     // En el que se une la tabla de DObj es la del host, pero los trazos del movimiento local (ClientThink) cruzan las
@@ -2197,7 +2386,14 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH) {
         char p[MAX_PATH];
         GetModuleFileNameA(self, p, MAX_PATH);
-        strcpy(strrchr(p, '\\') + 1, strstr(GetCommandLineA(), "coop2join") ? "cod2coop_join.log" : "cod2coop.log");
+        // pruebas con varios que se unen en la misma PC (tools/run2.ps1 join3/join4: fs_homepath ...\join3)
+        const char* cl = GetCommandLineA();
+        const char* j = strstr(cl, "\\join");
+        char name[32] = "cod2coop.log";
+        if (strstr(cl, "coop2join"))
+            snprintf(name, sizeof name, j && j[5] >= '3' && j[5] <= '9' ? "cod2coop_join%c.log" : "cod2coop_join.log",
+                     j ? j[5] : 0);
+        strcpy(strrchr(p, '\\') + 1, name);
         g_log = fopen(p, "w");
         strcpy(g_cmdFile, p);
         strcpy(strrchr(g_cmdFile, '.'), ".cmd");

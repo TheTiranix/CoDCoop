@@ -1,6 +1,6 @@
 # Call of Duty Coop
 
-Play the **Call of Duty 1 (2003)** campaign, and the **United Offensive** expansion, in co-op with friends: up to 4 players, through Steam, over the internet by IP, or on a local network.
+Play the **Call of Duty 1 (2003)** campaign, the **United Offensive** expansion and the **Call of Duty 2** campaign in co-op with friends: up to 4 players, through Steam, over the internet by IP, or on a local network.
 
 **[⬇ Download the installer](https://github.com/TheTiranix/CoDCoop/releases/latest)**
 
@@ -15,6 +15,7 @@ Play the **Call of Duty 1 (2003)** campaign, and the **United Offensive** expans
 - **Drop in, drop out.** If someone disconnects, their slot is freed and they can join again.
 - **On screen.** Teammates show up on the compass (not yet in United Offensive), with messages when someone is down or being revived.
 - **United Offensive too.** The same install works for the expansion if it is in the same folder: start `CoDUOSP.exe` and use its Co-op menu.
+- **Call of Duty 2 too.** Same idea for the Call of Duty 2 campaign: see [Call of Duty 2](#call-of-duty-2) below.
 - **Same difficulty as the game.** Friendly fire is off by default and can be turned on in the Co-op menu.
 - **No collisions between teammates.** Players can walk through each other, so nobody gets stuck when spawning together.
 
@@ -22,12 +23,13 @@ Play the **Call of Duty 1 (2003)** campaign, and the **United Offensive** expans
 
 - **Call of Duty 1 version 1.5** for Windows, on every PC that will play.
 - For the expansion: **United Offensive version 1.41**, installed in the same folder.
+- For Call of Duty 2: **version 1.3** (`CoD2SP_s.exe`).
 - The mod installed on all of those PCs.
 
 ## Install
 
 1. Download `Install-CoD-Coop.exe` from the [latest release](https://github.com/TheTiranix/CoDCoop/releases/latest).
-2. Run it and accept the game folder (the one with `CoDSP.exe`). If it can't find it, it lets you choose it.
+2. Run it and accept the game folder (the one with `CoDSP.exe`, or `CoD2SP_s.exe` for Call of Duty 2). If it can't find it, it lets you choose it.
 3. If Windows shows "Windows protected your PC", click **More info** → **Run anyway** (the installer is not signed).
 
 The installer copies `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pakz_coop.pk3` and a `CoD Coop README.txt` into the game folder, plus `uo\pakz_coop.pk3` if United Offensive is there. If there was already a `ddraw.dll` or `steam_api.dll` from another program, it keeps it with `.bak` added to the name.
@@ -65,6 +67,21 @@ In the same menu (also during the game, from the pause menu):
 | `set coop_friendlyfire 1` | Turns friendly fire on (on the host) |
 | `coopleave` | Leaves the co-op game (same as the Disconnect button) |
 
+## Call of Duty 2
+
+The Call of Duty 2 campaign works the same way: the host runs the mission and up to 3 friends join it.
+
+1. Start Call of Duty 2 (single player) and open **Co-op** in the main menu.
+2. **Host:** click **Host game**, then start or load a mission as usual (New Game, Mission Select, Resume).
+3. **Everyone else:** click **Join <name>** (Steam friends) or type the host's IP and click **Join**. Your game loads the host's mission by itself.
+
+- **Steam:** same as in Call of Duty 1 (no ports to open; Steam shows "Playing Spacewar"). Friends can also join from the Steam friends list (right-click the host → **Join Game**).
+- **By IP:** connections use **UDP port 28962** (the host opens it on their router when playing over the internet, or uses a virtual network such as Radmin VPN or ZeroTier).
+- Teammates see each other (standing, crouching, prone, with the weapon in hand), shoot, ride the host's vehicles, show up on the compass and revive each other.
+- The pause menu does not stop the game while teammates are connected. The **Co-op** window (also from the pause menu) has **Friendly fire** (the host decides) and **Disconnect**.
+- Console: `coop2host`, `coop2join <ip>`, `coop2join steam:<SteamID>`, `coop2leave`, `set coop2_friendlyfire 1`.
+- Uninstall: delete `ddraw.dll`, `cod2coop.dll`, `steam_api.dll` and `main\zz_coop2.iwd` from the Call of Duty 2 folder (and remove `.bak` from `ddraw.dll.bak` or `steam_api.dll.bak` if there are any).
+
 ## Uninstall
 
 Delete `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pakz_coop.pk3`, `uo\pakz_coop.pk3` and the `codcoop_tmp` folder from the game folder. If there are `.bak` files (`ddraw.dll.bak`, `steam_api.dll.bak`), remove the `.bak` from their names.
@@ -78,7 +95,7 @@ Under the hood, CoD1's single player is a Quake 3 server and client in the same 
 You need 32-bit MinGW-w64 (i686), Python 3 and the 32-bit `steam_api.dll` from the Steamworks SDK.
 
 1. Put a copy of the game in `game\` (not included in the repo) and set the MinGW and `steam_api.dll` paths in `build.bat`.
-2. Run `build.bat`. It builds `build\ddraw.dll`, `build\codcoop_core.dll`, `game\main\pakz_coop.pk3` and the installer `build\Install CoD Coop.exe`.
+2. Run `build.bat`. It builds `build\ddraw.dll`, `build\codcoop_core.dll`, `build\cod2coop.dll`, `game\main\pakz_coop.pk3` and the installer `build\Install CoD Coop.exe`. For Call of Duty 2, put a copy of it in `game2\`: the build also copies the mod there and makes `game2\main\zz_coop2.iwd`.
 
 ## License
 

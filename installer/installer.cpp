@@ -20,7 +20,7 @@ static const File COD1_FILES[] = {
 };
 static const File UO_FILES[] = {{6, L"uo\\pakz_coop.pk3"}};
 static const File COD2_FILES[] = {{1, L"ddraw.dll"}, {7, L"cod2coop.dll"}, {8, L"main\\zz_coop2.iwd"},
-                                  {4, L"CoD Coop README.txt"}};
+                                  {4, L"CoD Coop README.txt"}, {5, L"steam_api.dll"}};
 
 enum { COD1 = 1, UO = 2, COD2 = 4 };
 
@@ -120,7 +120,7 @@ static Result Install(const std::wstring& dir, int games, const std::vector<std:
     std::wstring ddraw = dir + L"\\ddraw.dll", steamDll = dir + L"\\steam_api.dll";
     if (Exists(ddraw) && !Exists(ddraw + L".bak") && ReadAll(ddraw).find("codcoop_core.dll") == std::string::npos)
         MoveFileW(ddraw.c_str(), (ddraw + L".bak").c_str());
-    if ((games & COD1) && Exists(steamDll) && !Exists(steamDll + L".bak") && ReadAll(steamDll) != Resource(5))
+    if ((games & (COD1 | COD2)) && Exists(steamDll) && !Exists(steamDll + L".bak") && ReadAll(steamDll) != Resource(5))
         MoveFileW(steamDll.c_str(), (steamDll + L".bak").c_str());
 
     std::vector<File> files;

@@ -4,7 +4,7 @@
 		name "coop_popmenu"
 		visible 0
 		fullscreen 0
-		rect 184 100 275 255
+		rect 184 70 275 330
 		focusColor GLOBAL_FOCUSED_COLOR
 		style 1
 		border 1
@@ -15,7 +15,7 @@
 		{
 			name backimage2fade
 			style WINDOW_STYLE_SHADER
-			rect -312 -102 896 484
+			rect -312 -72 896 484
 			background "white"
 			forecolor 0 0 0 0.3
 			backcolor 0 0 0 0.3
@@ -26,7 +26,7 @@
 		{
 			name backimage2fade
 			style WINDOW_STYLE_SHADER
-			rect -130 2 535 270
+			rect -130 2 535 335
 			background "popmenu_bg"
 			visible 1
 			decoration
@@ -76,6 +76,84 @@
 			mouseEnter { play "mouse_over"; }
 		}
 
+		// Steam: amigos que crearon partida (el mod pone los dvars cada 2 s, ver SteamFrame en src/cod2.cpp;
+		// ui_coop2_steamon<n> = 0 esconde el boton)
+		itemDef
+		{
+			name		steaminfo
+			rect		15 74 245 14
+			type		ITEM_TYPE_TEXT
+			style		0
+			dvar		"ui_coop2_steam"
+			textalign	ITEM_ALIGN_CENTER
+			textalignx	122
+			textaligny	11
+			textscale	.22
+			forecolor	1 1 1 .8
+			visible		1
+			decoration
+		}
+		itemDef
+		{
+			name		friend1
+			type		1
+			dvar		"ui_coop2_steam1"
+			dvarTest	"ui_coop2_steamon1"
+			showDvar	{ "1" }
+			textscale	.3
+			style		UI_BUTTON_STYLE
+			textfont	UI_FONT_NORMAL
+			textstyle	ITEM_TEXTSTYLE_SHADOWED
+			rect		30 92 215 20
+			textalign	1
+			textalignx	107
+			textaligny	15
+			forecolor	UI_BUTTON_TEXT_COLOR
+			visible		1
+			action { play "mouse_click"; exec "coop2joinsteam 1"; }
+			mouseEnter { play "mouse_over"; }
+		}
+		itemDef
+		{
+			name		friend2
+			type		1
+			dvar		"ui_coop2_steam2"
+			dvarTest	"ui_coop2_steamon2"
+			showDvar	{ "1" }
+			textscale	.3
+			style		UI_BUTTON_STYLE
+			textfont	UI_FONT_NORMAL
+			textstyle	ITEM_TEXTSTYLE_SHADOWED
+			rect		30 114 215 20
+			textalign	1
+			textalignx	107
+			textaligny	15
+			forecolor	UI_BUTTON_TEXT_COLOR
+			visible		1
+			action { play "mouse_click"; exec "coop2joinsteam 2"; }
+			mouseEnter { play "mouse_over"; }
+		}
+		itemDef
+		{
+			name		friend3
+			type		1
+			dvar		"ui_coop2_steam3"
+			dvarTest	"ui_coop2_steamon3"
+			showDvar	{ "1" }
+			textscale	.3
+			style		UI_BUTTON_STYLE
+			textfont	UI_FONT_NORMAL
+			textstyle	ITEM_TEXTSTYLE_SHADOWED
+			rect		30 136 215 20
+			textalign	1
+			textalignx	107
+			textaligny	15
+			forecolor	UI_BUTTON_TEXT_COLOR
+			visible		1
+			action { play "mouse_click"; exec "coop2joinsteam 3"; }
+			mouseEnter { play "mouse_over"; }
+		}
+
 		// unirse: IP del anfitrion (dvar coop2_ip; coop2join sin argumento la usa)
 		itemDef
 		{
@@ -85,7 +163,7 @@
 			dvar		"coop2_ip"
 			maxchars	40
 			maxPaintChars	20
-			rect		30 92 215 20
+			rect		30 166 215 20
 			style		1
 			border		1
 			bordercolor	.5 .5 .5 .5
@@ -108,7 +186,7 @@
 			style		UI_BUTTON_STYLE
 			textfont	UI_FONT_NORMAL
 			textstyle	ITEM_TEXTSTYLE_SHADOWED
-			rect		60 118 155 26
+			rect		60 190 155 26
 			textalign	1
 			textalignx	77
 			textaligny	20
@@ -124,7 +202,7 @@
 			type		ITEM_TYPE_YESNO
 			text		"Friendly fire: "
 			dvar		"coop2_friendlyfire"
-			rect		30 150 215 20
+			rect		30 222 215 20
 			style		1
 			border		1
 			bordercolor	.5 .5 .5 .5
@@ -148,7 +226,7 @@
 			style		UI_BUTTON_STYLE
 			textfont	UI_FONT_NORMAL
 			textstyle	ITEM_TEXTSTYLE_SHADOWED
-			rect		60 175 155 22
+			rect		60 247 155 22
 			textalign	1
 			textalignx	77
 			textaligny	17
@@ -166,7 +244,7 @@
 			style		UI_BUTTON_STYLE
 			textfont	UI_FONT_NORMAL
 			textstyle	ITEM_TEXTSTYLE_SHADOWED
-			rect		60 199 155 22
+			rect		60 271 155 22
 			textalign	1
 			textalignx	77
 			textaligny	17
@@ -180,7 +258,7 @@
 		itemDef
 		{
 			name		status
-			rect		15 225 245 42
+			rect		15 296 245 34
 			type		ITEM_TYPE_TEXT
 			style		0
 			textstyle	ITEM_TEXTSTYLE_SHADOWED
