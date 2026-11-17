@@ -531,10 +531,15 @@ void JoinerApplyAnims(const uint8_t* p, int len)
 // (vueltas por segundo), +0x24 nombre.
 constexpr int PS_CLIENTNUM = 0xa8;
 constexpr int PS_PMFLAGS = 0xc, PS_ORIGIN = 0x14, PS_VELOCITY = 0x20, PS_YAW = 0xc8, ES_PITCH = 0x44, ES_ROLL = 0x4c;
-enum BodyAnim { BA_IDLE, BA_WALK, BA_RUN, BA_BACK, BA_LEFT, BA_RIGHT, BA_DOWNED, BA_COUNT };
-const char* const kBodyAnimName[BA_COUNT] = {"stand_aim_straight", "stand_walk_combat_loop_01", "combatrun_forward_1",
-                                             "combatrun_back",     "combatrun_left",            "combatrun_right",
-                                             "wounded_crawlidle"};
+enum BodyAnim {
+    BA_IDLE, BA_WALK, BA_RUN, BA_BACK, BA_LEFT, BA_RIGHT, BA_DOWNED,
+    BA_CROUCH, BA_CROUCH_FWD, BA_CROUCH_BACK, BA_CROUCH_LEFT, BA_CROUCH_RIGHT, BA_PRONE, BA_PRONE_CRAWL, BA_COUNT
+};
+const char* const kBodyAnimName[BA_COUNT] = {
+    "stand_aim_straight", "stand_walk_combat_loop_01", "combatrun_forward_1", "combatrun_back", "combatrun_left",
+    "combatrun_right",    "wounded_crawlidle",         "crouch_aim_straight", "crouchwalk_loop", "crouchrun_loop_back",
+    "crouchrun_loop_left", "crouchrun_loop_right",     "prone_aim_idle",      "prone_crawl"};
+constexpr int PMF_PRONE = 0x1, PMF_DUCKED = 0x2;
 uint8_t* g_bodyTree[MAX_CLIENTS];
 int g_bodyAnim[MAX_CLIENTS] = {-1, -1, -1, -1};
 uint8_t* g_humanXAnim;
@@ -733,12 +738,15 @@ int ChooseBodyAnim(int n)
     uint8_t* ps = GClient(n);
     const float* v = (const float*)(ps + PS_VELOCITY);
     float speed = sqrtf(v[0] * v[0] + v[1] * v[1]);
-    if (speed < 5) return BA_IDLE;
+    int pmf = *(int*)(ps + PS_PMFLAGS);
+    if (pmf & PMF_PRONE) return speed < 5 ? BA_PRONE : BA_PRONE_CRAWL;
+    bool crouch = pmf & PMF_DUCKED;
+    if (speed < 5) return crouch ? BA_CROUCH : BA_IDLE;
     float rel = atan2f(v[1], v[0]) * 180.0f / 3.14159265f - *(float*)(ps + PS_YAW);
     rel -= 360.0f * floorf((rel + 180.0f) / 360.0f);  // a [-180, 180)
-    if (fabsf(rel) <= 50) return speed < 120 ? BA_WALK : BA_RUN;
-    if (fabsf(rel) >= 130) return BA_BACK;
-    return rel > 0 ? BA_LEFT : BA_RIGHT;
+    if (fabsf(rel) <= 50) return crouch ? BA_CROUCH_FWD : speed < 120 ? BA_WALK : BA_RUN;
+    if (fabsf(rel) >= 130) return crouch ? BA_CROUCH_BACK : BA_BACK;
+    return rel > 0 ? (crouch ? BA_CROUCH_LEFT : BA_LEFT) : (crouch ? BA_CROUCH_RIGHT : BA_RIGHT);
 }
 
 uint8_t* TreeInfo(uint8_t* tree, int node, bool alloc)
@@ -1821,12 +1829,34 @@ void MenuPause()
     }
 }
 
+// Brujula: el cgame dibuja como amigos a los actores marcados que vio hace menos de 800 ms (0x4c0fd4: lugar
+// 0x1c630bc[entidad] de la tabla 0xf79a88, 32 lugares de 0x18 bytes: hora, x, y, yaw). Los jugadores no son actores:
+// en coop cada juego anota a los demas jugadores en los lugares 31..28 con la posicion de su centity (0xf7eb80 +
+// e * 0x184: valido +0x140, lerpOrigin +0x148, yaw +0x158).
+constexpr uintptr_t CG_TIME = 0xf708dc, CG_ENTITIES = 0xf7eb80, COMPASS_FRIENDS = 0xf79a88;
+constexpr int CENT_SIZE = 0x184;
+void CompassFrame()
+{
+    bool host = g_role == HOST && AnyRemote(), joiner = g_role == JOINER && g_joined;
+    if (!host && !joiner) return;
+    int me = joiner ? g_slot : 0, now = *(int*)CG_TIME;
+    for (int n = 0; n < MAX_CLIENTS; ++n) {
+        const uint8_t* cent = (const uint8_t*)CG_ENTITIES + n * CENT_SIZE;
+        if (n == me || (host && !g_remote[n].active) || !cent[0x140]) continue;
+        uint8_t* slot = (uint8_t*)COMPASS_FRIENDS + (31 - n) * 0x18;
+        *(int*)slot = now;
+        memcpy(slot + 4, cent + 0x148, 8);
+        *(float*)(slot + 0xc) = *(const float*)(cent + 0x158);
+    }
+}
+
 // Com_Frame (0x42ed20), en cada frame del juego: sin nivel corriendo (menu, carga) Cod2_Snapshot no se llama; el que
 // se une igual pide entrar y recibe el mapa a cargar. El host solo atiende dentro del nivel.
 extern "C" void __cdecl Cod2_ComFrame()
 {
     RegisterCommands();  // coop2join tambien desde el menu principal
     MenuPause();
+    CompassFrame();
     if (GetTickCount() - g_lastLevelFrame < 500) return;  // en un nivel atiende Cod2_Snapshot
     PollCommandFile();
     static DWORD lastPing;
