@@ -59,12 +59,39 @@ inline Api a;
 inline bool up;
 inline char error[128] = "";
 
+// Steam visto sin steam_api: pid del registro (queda el viejo si Steam se cerro mal), si ese proceso vive y el usuario
+// con sesion. Cambia al abrir Steam o al iniciar sesion.
+inline uint64_t State()
+{
+    DWORD pid = 0, user = 0, size;
+    HKEY k;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam\\ActiveProcess", 0, KEY_READ, &k) == ERROR_SUCCESS) {
+        size = sizeof pid;
+        RegQueryValueExA(k, "pid", nullptr, nullptr, (BYTE*)&pid, &size);
+        size = sizeof user;
+        RegQueryValueExA(k, "ActiveUser", nullptr, nullptr, (BYTE*)&user, &size);
+        RegCloseKey(k);
+    }
+    bool alive = false;
+    if (HANDLE p = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr) {
+        alive = WaitForSingleObject(p, 0) == WAIT_TIMEOUT;
+        CloseHandle(p);
+    }
+    return alive ? (uint64_t)pid << 32 | user : 0;
+}
+
+// Cada SteamAPI_Init que falla deja 32 MB de memoria virtual reservada (CoD2 con Steam cerrado: +32 MB cada 10 s y
+// "Out of memory" a los 5 minutos). Se intenta al arrancar y de nuevo solo si Steam cambio (se abrio, inicio sesion).
 inline bool Start()
 {
     static DWORD lastTry;
+    static uint64_t triedState = ~0ull;
     if (up) return true;
     if (lastTry && GetTickCount() - lastTry < 10000) return false;  // Steam se puede abrir despues que el juego
     lastTry = GetTickCount();
+    uint64_t state = State();
+    if (state == triedState) return false;  // sigue igual que en el intento fallido: steam::error ya lo dice
+    triedState = state;
     if (!a.dll && !(a.dll = LoadLibraryA("steam_api.dll"))) return strcpy(error, "falta steam_api.dll"), false;
     struct { void* field; const char* name; } fns[] = {
         {&a.init, "SteamInternal_SteamAPI_Init"},
@@ -141,14 +168,14 @@ inline int Recv(uint8_t* buf, int size, uint64_t* from)
     return n;
 }
 
-// amigos con rich presence codcoop=host (Steam solo da la de amigos en la misma app, 480)
-template <class F> void ForEachHost(F fn)
+// amigos con rich presence codcoop=host (Steam solo da la de amigos en la misma app, 480); CoD2 usa codcoop2
+template <class F> void ForEachHost(F fn, const char* key = "codcoop")
 {
     if (!up) return;
     int count = a.friendCount(a.friends, 4);  // k_EFriendFlagImmediate
     for (int i = 0; i < count; ++i) {
         uint64_t id = a.friendByIndex(a.friends, i, 4);
-        if (!strcmp(a.friendPresence(a.friends, id, "codcoop"), "host")) fn(id);
+        if (!strcmp(a.friendPresence(a.friends, id, key), "host")) fn(id);
     }
 }
 
