@@ -93,19 +93,89 @@ What the lines mean:
 
 If the first start closes immediately, see section 1 (the OpenGL extension fix).
 
-## 4. Steam
+## 4. Steam (friend invites)
 
-Steam friend invites need `steamclient.dll` from a running Steam installation. If
-Steam is not available inside the Proton prefix, the log says:
+Steam invites work on Linux and are the same on Windows, but three things are
+required — on **every** PC, host and client:
+
+1. **Steam is running and signed in.** The mod loads `steamclient.dll` from the
+   running client; a Steam that is closed or still at the login screen is not
+   enough.
+2. **Spacewar (AppID 480) is installed once.** It is Valve's free test app and
+   the co-op uses it to talk to Steam (that is why Steam shows "Playing
+   Spacewar"). Install it from a browser or the console:
+   `steam://install/480`
+3. **The game is started through Steam.** Steam only injects
+   `steamclient.dll` into processes it launched, so add the game once:
+   **Games → Add a Non-Steam Game → Browse → `CoDSP.exe`**. On Linux also open
+   the shortcut's *Properties → Compatibility* and tick **Force the use of a
+   specific Steam Play compatibility tool** (Proton). Afterwards always start
+   the game from that Steam entry, not from the launcher.
+
+If a 4th step is needed for the OpenGL fix, put the variables in the shortcut's
+*Launch Options* (see section 1):
 
 ```
-steam: no disponible ... solo por IP
+__GL_ExtensionStringVersion=15000 MESA_EXTENSION_MAX_YEAR=2003 %command%
 ```
 
-That is fine — hosting and joining by IP still work. Use **Host IP** in the Co-op
-window and open **UDP 28960** (UDP 28962 for Call of Duty 2).
+**Check:** the mod writes `codcoop.log` next to `CoDSP.exe`. When Steam is
+reachable it says:
 
-## 5. Both sides need the same versions
+```
+steam: listo como 'your Steam name' (7656119...)
+```
+
+If it says `steam: no disponible ... solo por IP`, one of the three points is
+missing. Joining and hosting by IP still work in that case — use **Host IP** in
+the Co-op window and open **UDP 28960** (UDP 28962 for Call of Duty 2).
+
+Linux ↔ Windows works: the invite goes through Steam, not through the game, so
+the two sides can run different operating systems, different launchers and
+different copies of the game, as long as both are on **Call of Duty 1.5** with
+the **same mod version**.
+
+## 5. Building the DLLs on Linux
+
+The sources are plain C++ and only need a MinGW cross compiler — no Wine, no
+Visual Studio:
+
+```sh
+sudo apt install g++-mingw-w64-i686     # Debian / Ubuntu
+# Fedora: sudo dnf install mingw32-gcc-c++      Arch: sudo pacman -S mingw-w64-gcc
+
+./build.sh                 # build/ddraw.dll, build/codcoop_core.dll, build/cod2coop.dll
+./build.sh --install       # ... and copy them into game/ (and rebuild the menu pak)
+./build.sh --installer     # ... and build "Install CoD Coop.exe" (needs every file in installer/installer.rc)
+```
+
+`build.sh` is the same build as `build.bat`: identical flags, identical sources.
+The only file that is not in the repository is Valve's 32-bit `steam_api.dll`
+(Steam invites); copy it into `build/` from a Windows build or a Steamworks
+redistributable. Without it the mod still works over IP.
+
+## 6. Installing without Wine (`tools/install-linux.py`)
+
+The Windows installer only extracts its files, so on Linux you can do the same
+with a Python script that needs nothing but `python3`:
+
+```sh
+# from the latest GitHub release (downloads Install-CoD-Coop.exe and extracts it)
+python3 tools/install-linux.py --game "/path/to/Call of Duty"
+
+# from a local build/ produced by ./build.sh (menu pak taken from game/Main/)
+python3 tools/install-linux.py --game ".../Call of Duty" --build build
+
+# only verify an existing installation
+python3 tools/install-linux.py --game ".../Call of Duty" --check
+```
+
+It checks **Call of Duty 1.5 first** (`CoDSP.exe` must be 1,716,224 bytes) and
+stops with the download options if it is not — nothing is written in that case.
+Existing files are kept as `<name>.bak`. `--dry-run` shows what would be copied,
+`--allow-incomplete` installs anyway (multiplayer-only copies).
+
+## 7. Both sides need the same versions
 
 Host and client must both be on **Call of Duty 1.5** and the **same mod version**.
 The game version matters, not how you got there (official patch or a 1.5 build

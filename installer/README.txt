@@ -35,13 +35,22 @@ Play
   decides) and "Disconnect" to leave the co-op game.
 
 Through Steam (no ports to open)
-- Everyone with Steam and the game running.
+- Prerequisites on EVERY PC (Windows and Linux):
+  1. Steam installed, running and signed in.
+  2. Spacewar (AppID 480) installed once - it is free: steam://install/480
+     (the co-op uses this free test app of Valve to talk to Steam).
+  3. The game started THROUGH Steam: "Add a Non-Steam Game" -> CoDSP.exe.
+     On Linux also set Proton for that entry. Starting the game from another
+     launcher (or from the desktop) does not see Steam and cannot invite.
 - When the host clicks "Host game", their Steam friends get a "Join <name>" button
   in the Co-op menu.
 - You can also use the Steam friends list: right-click the host -> "Join Game"
   (with the game already running).
 - While the game is running, Steam shows "Playing Spacewar": that is expected, co-op
   uses that Steam test app to connect.
+- The game log (codcoop.log) says "steam: listo como 'your name'" when the
+  connection to Steam works. If it says "solo por IP", one of the three points
+  above is missing.
 
 Over the internet by IP
 - The host has to open UDP port 28960 on their router (forwarded to their PC) and

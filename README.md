@@ -59,13 +59,37 @@ NVIDIA card and with Mesa/llvmpipe:
    Under a launcher, put those two lines in a small wrapper around `umu-run` (or
    `proton`) and restart the launcher completely, including its tray icon.
 
-Full guide, including the wrapper and the start check the launcher shows:
-**[docs/linux.md](docs/linux.md)**.
+Full guide, including the wrapper, the start check the launcher shows and the
+Steam prerequisites: **[docs/linux.md](docs/linux.md)**.
 
-Steam friend invites need a running Steam inside the Proton prefix. Without it the
-mod logs `steam: no disponible ... solo por IP`, and joining by IP still works
-(UDP 28960). Host and client only have to match on **Call of Duty 1.5** and the
-mod version — Windows and Linux can play together.
+**Steam friend invites — prerequisites on every PC** (Windows and Linux):
+
+1. Steam is running and signed in.
+2. Spacewar (AppID 480) is installed once — it is free: `steam://install/480`.
+3. The game is started **through Steam**: *Add a Non-Steam Game* → `CoDSP.exe`
+   (on Linux set Proton for that entry). A game started by the launcher alone
+   does not see Steam.
+
+Without those the mod logs `steam: no disponible ... solo por IP`, and joining by
+IP still works (UDP 28960). Host and client only have to match on **Call of Duty
+1.5** and the mod version — Windows and Linux can play together.
+
+### Building and installing on Linux
+
+The sources build on Linux with a MinGW cross compiler, and the mod can be
+installed without Wine:
+
+```sh
+sudo apt install g++-mingw-w64-i686
+./build.sh                                                  # the three DLLs
+python3 tools/install-linux.py --game "/path/to/Call of Duty"   # from the latest release
+python3 tools/install-linux.py --game ".../Call of Duty" --build build   # from ./build.sh
+python3 tools/install-linux.py --game ".../Call of Duty" --check         # verify
+```
+
+The script insists on Call of Duty **1.5** before touching anything, keeps a
+`.bak` of replaced files and also handles a lowercase `main/` folder. Details in
+**[docs/linux.md](docs/linux.md)**.
 
 ## Play
 
