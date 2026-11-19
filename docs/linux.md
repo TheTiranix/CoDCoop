@@ -95,22 +95,26 @@ If the first start closes immediately, see section 1 (the OpenGL extension fix).
 
 ## 4. Steam (friend invites)
 
-Steam invites work on Linux and are the same on Windows, but three things are
-required — on **every** PC, host and client:
+Steam invites are the same on Linux and Windows, but three things are required —
+on **every** PC, host and client:
 
 1. **Steam is running and signed in.** The mod loads `steamclient.dll` from the
    running client; a Steam that is closed or still at the login screen is not
    enough.
 2. **Spacewar (AppID 480) is installed once.** It is Valve's free test app and
    the co-op uses it to talk to Steam (that is why Steam shows "Playing
-   Spacewar"). Install it from a browser or the console:
-   `steam://install/480`
-3. **The game is started through Steam.** Steam only injects
-   `steamclient.dll` into processes it launched, so add the game once:
-   **Games → Add a Non-Steam Game → Browse → `CoDSP.exe`**. On Linux also open
-   the shortcut's *Properties → Compatibility* and tick **Force the use of a
-   specific Steam Play compatibility tool** (Proton). Afterwards always start
-   the game from that Steam entry, not from the launcher.
+   Spacewar"). Both installers offer to open it at the end; you can also do it
+   yourself: `steam://install/480`.
+3. **The game sees Steam.**
+   * **Linux (Proton):** Steam only injects `steamclient.dll` into processes it
+     launched, so the game has to be started **through Steam**. Add it once:
+     **Games → Add a Non-Steam Game → Browse → `CoDSP.exe`**, then open the
+     shortcut's *Properties → Compatibility* and tick **Force the use of a
+     specific Steam Play compatibility tool** (Proton). Afterwards start the
+     game from that Steam entry, not from the launcher.
+   * **Windows:** starting the game normally (also from AnkerGames or the
+     desktop) is enough; the mod finds the running Steam by itself. Checking the
+     box *Run this game with Steam* is not needed.
 
 If a 4th step is needed for the OpenGL fix, put the variables in the shortcut's
 *Launch Options* (see section 1):

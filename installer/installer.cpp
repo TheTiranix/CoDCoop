@@ -212,5 +212,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     if (all & COD2)
         done += L"\nCall of Duty 2: start it as usual, the main menu has a \"Co-op\" button.";
     Msg(MB_ICONINFORMATION, done + L"\n\nInstructions are in \"CoD Coop README.txt\", in the game folder.");
+
+    // Steam invites ("Join <name>" in the Co-op menu) need Valve's free test app Spacewar (AppID 480) once per PC.
+    if ((all & (COD1 | COD2)) &&
+        Msg(MB_YESNO | MB_ICONQUESTION,
+            L"Steam invites (\"Join <name>\" in the Co-op menu) need Valve's free test app\n"
+            L"Spacewar (AppID 480) installed once on this PC, with Steam running.\n\n"
+            L"Open Steam now to install it? (Skip this if it is already installed.)") == IDYES)
+        ShellExecuteW(nullptr, L"open", L"steam://install/480", nullptr, nullptr, SW_SHOWNORMAL);
     return 0;
 }

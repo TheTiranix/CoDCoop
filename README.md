@@ -65,10 +65,14 @@ Steam prerequisites: **[docs/linux.md](docs/linux.md)**.
 **Steam friend invites — prerequisites on every PC** (Windows and Linux):
 
 1. Steam is running and signed in.
-2. Spacewar (AppID 480) is installed once — it is free: `steam://install/480`.
-3. The game is started **through Steam**: *Add a Non-Steam Game* → `CoDSP.exe`
-   (on Linux set Proton for that entry). A game started by the launcher alone
-   does not see Steam.
+2. Spacewar (AppID 480) is installed once — it is free, and both installers offer
+   to open it at the end (`steam://install/480`).
+3. The game has to see Steam:
+   * **Linux:** start the game **through Steam** — *Add a Non-Steam Game* →
+     `CoDSP.exe`, then set Proton for that entry. A game started by the launcher
+     alone does not see Steam.
+   * **Windows:** starting it normally is enough (also from AnkerGames); the mod
+     finds the running Steam by itself.
 
 Without those the mod logs `steam: no disponible ... solo por IP`, and joining by
 IP still works (UDP 28960). Host and client only have to match on **Call of Duty

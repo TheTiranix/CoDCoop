@@ -38,10 +38,14 @@ Through Steam (no ports to open)
 - Prerequisites on EVERY PC (Windows and Linux):
   1. Steam installed, running and signed in.
   2. Spacewar (AppID 480) installed once - it is free: steam://install/480
-     (the co-op uses this free test app of Valve to talk to Steam).
-  3. The game started THROUGH Steam: "Add a Non-Steam Game" -> CoDSP.exe.
-     On Linux also set Proton for that entry. Starting the game from another
-     launcher (or from the desktop) does not see Steam and cannot invite.
+     (the co-op uses this free test app of Valve to talk to Steam). The installer
+     offers to open it when it finishes.
+  3. The game has to see Steam:
+     - Linux (Proton): start the game THROUGH Steam ("Add a Non-Steam Game" ->
+       CoDSP.exe, and set Proton for that entry). Starting it only from the
+       launcher does not see Steam and cannot invite.
+     - Windows: starting it normally is enough (also from AnkerGames or the
+       desktop); the mod finds the running Steam by itself.
 - When the host clicks "Host game", their Steam friends get a "Join <name>" button
   in the Co-op menu.
 - You can also use the Steam friends list: right-click the host -> "Join Game"

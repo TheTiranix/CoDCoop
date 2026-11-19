@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import urllib.request
@@ -73,6 +74,55 @@ def say(*a):
 def die(msg):
     say("ERROR: " + msg)
     sys.exit(2)
+
+
+def steam_apps_dirs():
+    """steamapps folders of the local Steam installation (all libraries)."""
+    home = os.path.expanduser("~")
+    out = []
+    for base in (os.path.join(home, ".local/share/Steam"), os.path.join(home, ".steam/steam")):
+        out.append(os.path.join(base, "steamapps"))
+        vdf = os.path.join(base, "steamapps/libraryfolders.vdf")
+        try:
+            with open(vdf, errors="replace") as f:
+                for line in f:
+                    m = re.search(r'"path"\s+"([^"]+)"', line)
+                    if m:
+                        out.append(os.path.join(m.group(1), "steamapps"))
+        except OSError:
+            pass
+    return out
+
+
+def spacewar_installed():
+    return any(os.path.exists(os.path.join(d, "appmanifest_480.acf")) for d in steam_apps_dirs())
+
+
+def offer_spacewar():
+    """Spacewar (AppID 480) is what the mod uses to talk to Steam; it is free but has to be installed once."""
+    url = "steam://install/480"
+    if spacewar_installed():
+        say("Spacewar (AppID 480): installed (Steam invites ready once Steam runs).")
+        return
+    say("Spacewar (AppID 480) is not installed: Steam invites need it once, it is free.")
+    if not sys.stdin.isatty():
+        say("Install it later with: " + url)
+        return
+    try:
+        ans = input("Open Steam now to install Spacewar? [Y/n] ").strip().lower()
+    except EOFError:
+        ans = "n"
+    if ans not in ("", "y", "yes", "j", "ja"):
+        say("Skipped. You can install it later with: " + url)
+        return
+    for cmd in (["xdg-open", url], ["steam", url]):
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            say("asked Steam to install Spacewar (" + url + ")")
+            return
+        except FileNotFoundError:
+            continue
+    say("could not open Steam - open this link: " + url)
 
 
 def download(url, dest):
@@ -338,14 +388,18 @@ def main():
     todo = plan(game, source, alt)
     say("")
     install(game, todo, args.dry_run, args.force, known=not args.build)
+    if not args.dry_run:
+        say("")
+        offer_spacewar()
     say("""
 Done. In the game: Co-op -> Host game -> Back -> New Game.
 Friends: same CoD 1.5 and same mod version, then Host IP -> Join, or Steam invites.
 
 Steam invites (cross-platform) need all three:
   * Steam running and signed in on both PCs
-  * Spacewar (AppID 480) installed once - it is free: steam://install/480
-  * the game started through Steam (Add a Non-Steam Game -> CoDSP.exe, force Proton on Linux)
+  * Spacewar (AppID 480) installed once - the installer offers it, or: steam://install/480
+  * on Linux the game has to be started through Steam (Add a Non-Steam Game ->
+    CoDSP.exe, force Proton); on Windows starting it normally is enough
 See docs/linux.md for the exact steps.
 """)
     return 0
