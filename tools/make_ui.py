@@ -19,6 +19,12 @@ def build(folder, pak, paused_tests):
     # UiPausedFrame en src/core.cpp) y sin esto su menu mostraba "Continuar partida" en vez de "Volver a la partida"
     menu, changed = re.subn(r'(cvarTest\s+)"cl_paused"', r'\1"ui_coop_paused"', menu, flags=re.I)
     assert changed == paused_tests, changed
+
+    # al alojar sin mision el estado de pausa es 2: para ese valor no habia ningun item y
+    # desaparecian Nueva Partida / Cargar Partida / Creditos. En vez de "mostrar solo con 0"
+    # (showCVar) pasan a "ocultar solo en partida" (hideCvar 1), asi siguen a la vista en 0 y 2.
+    menu, hidden = re.subn(r'showCvar(\s*)\{\s*"0"\s*\}', r'hideCvar\1{ "1" }', menu, flags=re.I)
+    assert hidden == 7, hidden   # los 7 items de "main" que miraban solo el estado 0
     lines = menu.split('\n')
     # lugar para el boton: en el menu "main" (hasta el siguiente menuDef) la columna de abajo pasa de 35 a 30 px
     end = next(i for i, l in enumerate(lines) if i > 30 and re.match(r'\s*menuDef\b', l))

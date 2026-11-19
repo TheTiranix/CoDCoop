@@ -78,7 +78,7 @@
 			forecolor UI_BUTTON_TEXT_COLOR
 			backcolor UI_BUTTON_BACK_COLOR
 			visible 1
-			action { play "mouse_click"; exec "coophost"; }
+			action { play "mouse_click"; exec "set ui_coop_hosting 1"; exec "coophost"; }
 			mouseEnter { setitemcolor host backcolor UI_BUTTON_BACK_COLOR_HOVER play "mouse_over" }
 			mouseExit { setitemcolor host backcolor UI_BUTTON_BACK_COLOR }
 		}
@@ -182,9 +182,30 @@
 			forecolor UI_BUTTON_TEXT_COLOR
 			backcolor UI_BUTTON_BACK_COLOR
 			visible 1
-			action { play "mouse_click"; exec "coopleave"; }
+			action { play "mouse_click"; exec "set ui_coop_hosting 0"; exec "coopleave"; }
 			mouseEnter { setitemcolor leave backcolor UI_BUTTON_BACK_COLOR_HOVER play "mouse_over" }
 			mouseExit { setitemcolor leave backcolor UI_BUTTON_BACK_COLOR }
+		}
+
+		// aviso: el puerto ya esta abierto y lo siguiente es "Back" + "New Game"
+		// (ui_coop_hosting lo pone el boton de arriba; sin esto el jugador no ve nada tras "Host game")
+		itemDef
+		{
+			name hostingnote
+			rect 20 186 255 14
+			type ITEM_TYPE_TEXT
+			style 1
+			textstyle 3
+			text "HOSTING - UDP 28960 open. Press Back, then New Game."
+			cvarTest "ui_coop_hosting"
+			showCVar { "1" }
+			textscale .16
+			textalign ITEM_ALIGN_CENTER
+			textalignx 127
+			textaligny 10
+			forecolor 0 1 0 1
+			visible 1
+			decoration
 		}
 
 		// Steam: amigos que crearon partida (el mod pone los cvars cada 2 s, ver SteamFrame en src/core.cpp;

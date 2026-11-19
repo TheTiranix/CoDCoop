@@ -37,7 +37,7 @@ The installer copies `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pak
 ## Play
 
 1. Start Call of Duty as usual and open **Co-op** in the main menu.
-2. **Host:** click **Host game** and then pick **New Game** or **Load Game**.
+2. **Host:** click **Host game** (a green line confirms the port is open) and then pick **New Game** or **Load Game**.
 3. **Everyone else:** click **Join <name>** (Steam friends) or type the host's IP and click **Join**.
 
 In the same menu (also during the game, from the pause menu):
@@ -81,6 +81,24 @@ The Call of Duty 2 campaign works the same way: the host runs the mission and up
 - The pause menu does not stop the game while teammates are connected. The **Co-op** window (also from the pause menu) has **Friendly fire** (the host decides) and **Disconnect**.
 - Console: `coop2host`, `coop2join <ip>`, `coop2join steam:<SteamID>`, `coop2leave`, `set coop2_friendlyfire 1`.
 - Uninstall: delete `ddraw.dll`, `cod2coop.dll`, `steam_api.dll` and `main\zz_coop2.iwd` from the Call of Duty 2 folder (and remove `.bak` from `ddraw.dll.bak` or `steam_api.dll.bak` if there are any).
+
+## Troubleshooting
+
+- **After "Host game" there is no New Game / Load Game / Credits in the menu.**
+  That was a menu bug while hosting: update to a current build (see
+  [docs/menu-hosting-fix.md](docs/menu-hosting-fix.md)). It is fixed in the menu
+  that ships with the installer.
+- **Your launcher says "This copy differs from the build you installed".**
+  Expected: the mod adds files, and Call of Duty 1.5 replaces `CoDSP.exe`. Click
+  **Keep my files**; do not repair, or the launcher puts the original files back.
+
+  ![Launcher warning: choose Keep my files](docs/screenshots/launcher-keep-files.png)
+
+- **Linux / Proton: the game closes with "Buffer overrun detected!"**
+  Old engine, modern GPU drivers. See [docs/linux.md](docs/linux.md).
+- **Steam is not available, only IP joining.** Without a running Steam inside the
+  Proton prefix the mod logs `steam: no disponible ... solo por IP`. IP joining
+  still works (UDP 28960).
 
 ## Uninstall
 

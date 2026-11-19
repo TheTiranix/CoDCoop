@@ -24,3 +24,23 @@
 				open coop_popmenu
 			}
 		}
+
+		// aviso en el menu principal mientras se aloja una partida
+		itemDef
+		{
+			name hostingnote_main
+			rect 385 424 240 12
+			type ITEM_TYPE_TEXT
+			style 1
+			textstyle 3
+			text "CO-OP: hosting - UDP 28960 open"
+			cvarTest "ui_coop_hosting"
+			showCVar { "1" }
+			textscale .2
+			textalign ITEM_ALIGN_LEFT
+			textalignx 0
+			textaligny 10
+			forecolor 0 1 0 1
+			visible 1
+			decoration
+		}
