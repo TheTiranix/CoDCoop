@@ -1,7 +1,18 @@
 # Running CoD Coop on Linux (Proton / Wine)
 
-The mod itself is a Windows mod (DLLs loaded by the game). On Linux it runs
-through Proton, and two things are worth knowing.
+The mod is a Windows mod (DLLs loaded by the game) and runs on Linux through
+Proton. This guide is the setup that was tested end to end:
+
+| | |
+|---|---|
+| Launcher | AnkerGames (also applies to similar launchers that start the game through `umu-run`/Proton) |
+| Proton | 11.0 |
+| GPU / driver | NVIDIA (proprietary) and Mesa (llvmpipe) |
+| Game | Call of Duty 1.5, mod 0.5.0 |
+
+Three things matter on Linux: the launcher has to keep the modified files, the
+driver must not report more OpenGL extensions than the 2003 engine can hold, and
+Steam — if you want the friend list — has to be reachable inside the prefix.
 
 ## 1. "Buffer overrun detected!" right after the intro
 

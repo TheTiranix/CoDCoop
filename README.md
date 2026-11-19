@@ -34,6 +34,39 @@ Play the **Call of Duty 1 (2003)** campaign, the **United Offensive** expansion 
 
 The installer copies `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pakz_coop.pk3` and a `CoD Coop README.txt` into the game folder, plus `uo\pakz_coop.pk3` if United Offensive is there. If there was already a `ddraw.dll` or `steam_api.dll` from another program, it keeps it with `.bak` added to the name.
 
+## Linux (Proton / Wine)
+
+The mod is a Windows mod and runs on Linux through Proton. Everything below was
+set up and tested on Linux with the **AnkerGames launcher** and Proton 11.0, on an
+NVIDIA card and with Mesa/llvmpipe:
+
+1. Install the game and the launcher as usual, get Call of Duty to **1.5**, then
+   run the mod installer.
+2. When the launcher warns that the files changed, click **Keep my files**:
+
+   ![Launcher warning: click "Keep my files"](docs/screenshots/launcher-keep-files.png)
+
+   *Repair* puts the original files back and removes the mod.
+3. If the game closes right after the intro with **"Buffer overrun detected!"**,
+   that is an old-engine problem with modern GPU drivers, not the mod. Two
+   environment variables fix it:
+
+   ```sh
+   export __GL_ExtensionStringVersion=15000   # NVIDIA
+   export MESA_EXTENSION_MAX_YEAR=2003        # AMD / Intel (Mesa)
+   ```
+
+   Under a launcher, put those two lines in a small wrapper around `umu-run` (or
+   `proton`) and restart the launcher completely, including its tray icon.
+
+Full guide, including the wrapper and the start check the launcher shows:
+**[docs/linux.md](docs/linux.md)**.
+
+Steam friend invites need a running Steam inside the Proton prefix. Without it the
+mod logs `steam: no disponible ... solo por IP`, and joining by IP still works
+(UDP 28960). Host and client only have to match on **Call of Duty 1.5** and the
+mod version — Windows and Linux can play together.
+
 ## Play
 
 1. Start Call of Duty as usual and open **Co-op** in the main menu.
@@ -88,14 +121,9 @@ The Call of Duty 2 campaign works the same way: the host runs the mission and up
   That was a menu bug while hosting: update to a current build (see
   [docs/menu-hosting-fix.md](docs/menu-hosting-fix.md)). It is fixed in the menu
   that ships with the installer.
-- **Your launcher says "This copy differs from the build you installed".**
-  Expected: the mod adds files, and Call of Duty 1.5 replaces `CoDSP.exe`. Click
-  **Keep my files**; do not repair, or the launcher puts the original files back.
-
-  ![Launcher warning: choose Keep my files](docs/screenshots/launcher-keep-files.png)
-
-- **Linux / Proton: the game closes with "Buffer overrun detected!"**
-  Old engine, modern GPU drivers. See [docs/linux.md](docs/linux.md).
+- **Linux / Proton: the game crashes or the launcher wants to repair the install.**
+  See [Linux (Proton / Wine)](#linux-proton--wine) above and
+  [docs/linux.md](docs/linux.md).
 - **Steam is not available, only IP joining.** Without a running Steam inside the
   Proton prefix the mod logs `steam: no disponible ... solo por IP`. IP joining
   still works (UDP 28960).

@@ -67,7 +67,8 @@ hidden while hosting.
 
 ## Tested
 
-Built with `python -I tools/make_ui.py` and started the game (CoD 1.5):
+Built with `python -I tools/make_ui.py` and started the game (Call of Duty 1.5 on
+Linux, AnkerGames launcher + Proton 11.0):
 
 | State | Result |
 |---|---|
