@@ -2151,7 +2151,8 @@ void SteamFrame()
         if (up) Log("steam: listo como '%s' (%I64u)", steam::Name(steam::MyId()), steam::MyId());
         else Log("steam: no disponible (%s), solo por IP", steam::error);
         if (!up) {
-            g::Cvar_Set("ui_coop_steam", "Steam is closed: you can only join by IP.");
+            g::Cvar_Set("ui_coop_steam", steam::needSteamLaunch ? "Start the game from Steam to invite friends."
+                                                                : "Steam is closed: you can only join by IP.");
             HideFriendButtons(1);
         }
         wasUp = up;

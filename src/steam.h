@@ -57,21 +57,35 @@ struct Api {
 };
 inline Api a;
 inline bool up;
-inline char error[128] = "";
+inline char error[256] = "";
+// Wine/Proton: el cliente de Steam solo entra al prefix si Steam arranco el juego ("Add a Non-Steam Game").
+inline bool needSteamLaunch = false;
 
 // Steam visto sin steam_api: pid del registro (queda el viejo si Steam se cerro mal), si ese proceso vive y el usuario
 // con sesion. Cambia al abrir Steam o al iniciar sesion.
+// Wine/Proton: el cliente escribe el registro en el prefix, pero el PID es un marcador (0xfffe) sin proceso
+// detras: si se exige que viva, el mod no reintentaria al iniciar sesion ni al arrancar Steam despues.
+inline bool Wine()
+{
+    static int v = -1;
+    if (v < 0) v = GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_version") != nullptr;
+    return v != 0;
+}
+
 inline uint64_t State()
 {
     DWORD pid = 0, user = 0, size;
+    bool key = false;
     HKEY k;
     if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam\\ActiveProcess", 0, KEY_READ, &k) == ERROR_SUCCESS) {
+        key = true;
         size = sizeof pid;
         RegQueryValueExA(k, "pid", nullptr, nullptr, (BYTE*)&pid, &size);
         size = sizeof user;
         RegQueryValueExA(k, "ActiveUser", nullptr, nullptr, (BYTE*)&user, &size);
         RegCloseKey(k);
     }
+    if (key && Wine()) return (uint64_t)pid << 32 | user;
     bool alive = false;
     if (HANDLE p = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr) {
         alive = WaitForSingleObject(p, 0) == WAIT_TIMEOUT;
@@ -121,8 +135,12 @@ inline bool Start()
         SetEnvironmentVariableA("SteamAppId", "480");  // Spacewar, sin steam_appid.txt
         a.dispatchInit();
         char err[1024] = "";
-        if (a.init("SteamUser023\0SteamFriends017\0SteamNetworkingMessages002\0", err) != 0)
-            return snprintf(error, sizeof error, "Steam cerrado o sin sesion (%s)", err), false;
+        if (a.init("SteamUser023\0SteamFriends017\0SteamNetworkingMessages002\0", err) != 0) {
+            // En Linux/Proton solo funciona si Steam arranco el juego (ahi provee steamclient.dll en el prefix).
+            needSteamLaunch = strstr(err, "steamclient") && Wine();
+            const char* hint = needSteamLaunch ? " - inicia el juego desde Steam" : "";
+            return snprintf(error, sizeof error, "Steam cerrado o sin sesion (%s)%s", err, hint), false;
+        }
     }
     a.users = a.userIf();
     a.friends = a.friendsIf();
