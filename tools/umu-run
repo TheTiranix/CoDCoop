@@ -71,7 +71,11 @@ steam_launch() {
   [ -n "$id64" ] || return 1
 
   if game_running; then
-    echo "CoD Coop: the game is already running."
+    # A second Play (or a double click) while the game is up: keep this
+    # process alive until the game exits, so the launcher does not think the
+    # session already ended.
+    echo "CoD Coop: the game is already running; waiting for it to exit."
+    while game_running; do sleep 2; done
     return 0
   fi
 
