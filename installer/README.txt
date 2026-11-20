@@ -15,6 +15,9 @@ What you need
 Install
 - Run "Install CoD Coop.exe" and accept the game folder (the one with CoDSP.exe, or
   CoD2SP_s.exe for Call of Duty 2). It detects the game and installs the matching files.
+- First start: if Call of Duty asks whether the computer changed (WIN_COMPUTER_CHANGE
+  or "your configuration has changed"), click "Ja" once. The game stores the hardware
+  it detected and does not ask again.
 
 Call of Duty 2 (experimental)
 - Version 1.3 (CoD2SP_s.exe), with co-op installed on every PC.
@@ -43,7 +46,11 @@ Through Steam (no ports to open)
   3. The game has to see Steam:
      - Linux (Proton): start the game THROUGH Steam ("Add a Non-Steam Game" ->
        CoDSP.exe, and set Proton for that entry). Starting it only from the
-       launcher does not see Steam and cannot invite.
+       launcher does not see Steam and cannot invite. In the shortcut's
+       "Launch Options" put:
+         WINEDLLOVERRIDES="ddraw=n,b" __GL_ExtensionStringVersion=15000 MESA_EXTENSION_MAX_YEAR=2003 %command%
+       WINEDLLOVERRIDES is required: without it Wine uses its own ddraw.dll and
+       the mod is not loaded at all (no Co-op entry, no codcoop.log).
      - Windows: starting it normally is enough (also from AnkerGames or the
        desktop); the mod finds the running Steam by itself.
 - When the host clicks "Host game", their Steam friends get a "Join <name>" button

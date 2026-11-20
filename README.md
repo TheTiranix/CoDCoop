@@ -57,7 +57,14 @@ NVIDIA card and with Mesa/llvmpipe:
    ```
 
    Under a launcher, put those two lines in a small wrapper around `umu-run` (or
-   `proton`) and restart the launcher completely, including its tray icon.
+   `proton`) and restart the launcher completely, including its tray icon. The
+   same wrapper has to add `WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}ddraw=n,b"`
+   — without it Wine uses its own `ddraw.dll` and the mod is not loaded (no
+   *Co-op* entry, no `codcoop.log`). The ready-made wrapper is in
+   [docs/linux.md](docs/linux.md), section 1.
+4. On the first start Call of Duty may ask whether the hardware changed (the
+   launcher's config comes from another PC). Click **Ja** once — the game then
+   stores the values it detected and the question does not come back.
 
 Full guide, including the wrapper, the start check the launcher shows and the
 Steam prerequisites: **[docs/linux.md](docs/linux.md)**.
@@ -70,7 +77,15 @@ Steam prerequisites: **[docs/linux.md](docs/linux.md)**.
 3. The game has to see Steam:
    * **Linux:** start the game **through Steam** — *Add a Non-Steam Game* →
      `CoDSP.exe`, then set Proton for that entry. A game started by the launcher
-     alone does not see Steam.
+     alone does not see Steam. In the shortcut's *Launch Options* put:
+
+     ```
+     WINEDLLOVERRIDES="ddraw=n,b" __GL_ExtensionStringVersion=15000 MESA_EXTENSION_MAX_YEAR=2003 %command%
+     ```
+
+     The first part is required: Wine otherwise uses its own `ddraw.dll` and the
+     mod is not loaded at all (no *Co-op* entry, no `codcoop.log`). The two
+     variables are the OpenGL fix from step 3.
    * **Windows:** starting it normally is enough (also from AnkerGames); the mod
      finds the running Steam by itself.
 

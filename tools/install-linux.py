@@ -76,6 +76,68 @@ def die(msg):
     sys.exit(2)
 
 
+def read_configure_csv(game):
+    """configure.csv holds the hardware table; it normally lives inside Main/pak0.pk3."""
+    main = find(game, "Main") or game
+    loose = find(main, "configure.csv")
+    if loose:
+        with open(loose, "rb") as f:
+            return f.read()
+    try:
+        names = sorted(os.listdir(main))
+    except OSError:
+        return None
+    for name in names:
+        if not name.lower().endswith(".pk3"):
+            continue
+        try:
+            with zipfile.ZipFile(os.path.join(main, name)) as z:
+                for entry in z.namelist():
+                    if entry.lower() == "configure.csv":
+                        return z.read(entry)
+        except (OSError, zipfile.BadZipFile):
+            continue
+    return None
+
+
+def config_sum(data):
+    """The checksum the engine compares with sys_configSum (28 bits, +1)."""
+    value = 0
+    for byte in data:
+        value = (value * 31337 + (byte - 256 if byte > 127 else byte)) & 0xFFFFFFFF
+    return (value & 0x0FFFFFFF) + 1
+
+
+def repair_config_sum(game):
+    """Keep the "configuration updated" prompt away (docs/linux.md, section 5)."""
+    main = find(game, "Main")
+    if not main:
+        return
+    cfg = find(main, "config.cfg")
+    data = read_configure_csv(game) if cfg else None
+    if not data:
+        return
+    want = config_sum(data)
+    try:
+        with open(cfg, "r", encoding="latin-1") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    for i, line in enumerate(lines):
+        m = re.match(r'\s*seta\s+sys_configSum\s+"?(-?\d+)"?\s*$', line, re.I)
+        if not m:
+            continue
+        if int(m.group(1)) == want:
+            say("config.cfg: sys_configSum is correct (%d)" % want)
+        else:
+            lines[i] = 'seta sys_configSum "%d"' % want
+            with open(cfg, "w", encoding="latin-1") as f:
+                f.write("\n".join(lines) + "\n")
+            say("config.cfg: sys_configSum %s -> %d" % (m.group(1), want))
+        return
+    say("config.cfg: no sys_configSum yet (the game writes it on the first start)")
+
+
 def steam_apps_dirs():
     """steamapps folders of the local Steam installation (all libraries)."""
     home = os.path.expanduser("~")
@@ -389,6 +451,7 @@ def main():
     say("")
     install(game, todo, args.dry_run, args.force, known=not args.build)
     if not args.dry_run:
+        repair_config_sum(game)
         say("")
         offer_spacewar()
     say("""
@@ -400,6 +463,13 @@ Steam invites (cross-platform) need all three:
   * Spacewar (AppID 480) installed once - the installer offers it, or: steam://install/480
   * on Linux the game has to be started through Steam (Add a Non-Steam Game ->
     CoDSP.exe, force Proton); on Windows starting it normally is enough
+
+Launch Options of that Steam entry (Linux):
+  WINEDLLOVERRIDES="ddraw=n,b" __GL_ExtensionStringVersion=15000 MESA_EXTENSION_MAX_YEAR=2003 %command%
+  (WINEDLLOVERRIDES is required - without it Wine uses its own ddraw.dll and the
+   mod is not loaded: no Co-op entry, no codcoop.log)
+
+First start: if Call of Duty asks whether the computer changed, click "Ja" once.
 See docs/linux.md for the exact steps.
 """)
     return 0

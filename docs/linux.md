@@ -54,11 +54,18 @@ case "$* $WINEPREFIX $PWD" in
   *CoDSP.exe*|*CoDMP.exe*|*CoDUOSP.exe*|*"Call of Duty"*)
     export __GL_ExtensionStringVersion=15000
     export MESA_EXTENSION_MAX_YEAR=2003
+    # the mod is loaded by its own ddraw.dll - Wine prefers its built-in one
+    export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}ddraw=n,b"
     ;;
 esac
 
 exec /usr/bin/umu-run "$@"
 ```
+
+The `WINEDLLOVERRIDES` line is what makes the mod load at all under a launcher:
+Wine otherwise uses its own `ddraw.dll` and the game starts without the mod (no
+*Co-op* entry in the menu, no `codcoop.log`). Appending to an existing value keeps
+whatever the launcher or Proton already sets for DXVK.
 
 Put it in place of the launcher's `umu-run` (back up the original first) and
 restart the launcher **completely**, including its tray icon — otherwise the old
@@ -116,15 +123,27 @@ on **every** PC, host and client:
      desktop) is enough; the mod finds the running Steam by itself. Checking the
      box *Run this game with Steam* is not needed.
 
-If a 4th step is needed for the OpenGL fix, put the variables in the shortcut's
-*Launch Options* (see section 1):
+### Launch Options for the Steam entry (Linux)
+
+Right-click the new Steam entry → *Properties* → **Launch Options** and paste:
 
 ```
-__GL_ExtensionStringVersion=15000 MESA_EXTENSION_MAX_YEAR=2003 %command%
+WINEDLLOVERRIDES="ddraw=n,b" __GL_ExtensionStringVersion=15000 MESA_EXTENSION_MAX_YEAR=2003 %command%
 ```
 
-**Check:** the mod writes `codcoop.log` next to `CoDSP.exe`. When Steam is
-reachable it says:
+| Part | Why |
+|---|---|
+| `WINEDLLOVERRIDES="ddraw=n,b"` | **Required.** The mod is loaded by its own `ddraw.dll` next to `CoDSP.exe`. Wine prefers its built-in `ddraw.dll` unless told otherwise — without this the game starts **without the mod**: no *Co-op* entry in the menu and no `codcoop.log`. |
+| `__GL_ExtensionStringVersion=15000` | NVIDIA: keeps the OpenGL extension string short enough for the 2003 engine (section 1). |
+| `MESA_EXTENSION_MAX_YEAR=2003` | Mesa (AMD/Intel): the same fix. |
+| `%command%` | Steam replaces this with the game. |
+
+**Check that the mod is loaded:** the main menu shows **Co-op** between
+*Multiplayer* and *Options*, and `codcoop.log` appears next to `CoDSP.exe`. If
+both are missing, the `WINEDLLOVERRIDES` part is missing or misspelt.
+
+The mod writes `codcoop.log` next to `CoDSP.exe`. When Steam is reachable it
+says:
 
 ```
 steam: listo como 'your Steam name' (7656119...)
@@ -139,7 +158,39 @@ the two sides can run different operating systems, different launchers and
 different copies of the game, as long as both are on **Call of Duty 1.5** with
 the **same mod version**.
 
-## 5. Building the DLLs on Linux
+## 5. "Your computer has changed" on the first start
+
+**Symptom:** before the main menu a small Windows dialog appears. With the
+AnkerGames package the title and text are raw tokens
+(`WIN_COMPUTER_CHANGE_TITLE`, `WIN_COMPUTER_CHANGE_BODY`) because that package
+ships without `Main/localization.txt`; the buttons are **Ja** / **Nein**.
+
+**Cause:** Call of Duty stores the hardware it detected in `Main/config.cfg`
+(`sys_cpuMHz`, `sys_sysMB`, `sys_vidMB`) and compares it on every start. A
+pre-installed copy can carry values from the machine it was prepared on: in the
+AnkerGames install used for testing, `Main/config.cfg` had 1024 MB video memory
+while Proton reports 4096 MB. Anything more than 16 MB apart triggers the
+prompt. This is the stock game, not the mod: it appears with and without it.
+
+**Fix:** click **Ja** once. The game writes what it just detected and the prompt
+is gone for good:
+
+```
+seta sys_cpuMHz "2903.97"
+seta sys_sysMB "1024"
+seta sys_vidMB "4096"
+```
+
+If it comes back on every start, `Main/config.cfg` is read-only or two different
+launchers report different values for the same install. Pick one way to start the
+game (section 4) and answer once more.
+
+The other message that can appear, `WIN_CONFIGURE_UPDATED`, compares
+`sys_configSum` with a hash of `configure.csv` (inside `Main/pak0.pk3`).
+`tools/install-linux.py` recomputes it. If you copy the game by hand, delete the
+`seta sys_configSum` line and the game writes it again.
+
+## 6. Building the DLLs on Linux
 
 The sources are plain C++ and only need a MinGW cross compiler — no Wine, no
 Visual Studio:
@@ -158,7 +209,7 @@ The only file that is not in the repository is Valve's 32-bit `steam_api.dll`
 (Steam invites); copy it into `build/` from a Windows build or a Steamworks
 redistributable. Without it the mod still works over IP.
 
-## 6. Installing without Wine (`tools/install-linux.py`)
+## 7. Installing without Wine (`tools/install-linux.py`)
 
 The Windows installer only extracts its files, so on Linux you can do the same
 with a Python script that needs nothing but `python3`:
@@ -179,7 +230,7 @@ stops with the download options if it is not — nothing is written in that case
 Existing files are kept as `<name>.bak`. `--dry-run` shows what would be copied,
 `--allow-incomplete` installs anyway (multiplayer-only copies).
 
-## 7. Both sides need the same versions
+## 8. Both sides need the same versions
 
 Host and client must both be on **Call of Duty 1.5** and the **same mod version**.
 The game version matters, not how you got there (official patch or a 1.5 build
