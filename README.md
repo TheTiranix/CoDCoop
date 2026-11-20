@@ -175,6 +175,12 @@ The Call of Duty 2 campaign works the same way: the host runs the mission and up
 - **Steam is not available, only IP joining.** Without a running Steam inside the
   Proton prefix the mod logs `steam: no disponible ... solo por IP`. IP joining
   still works (UDP 28960).
+- **A dialog mentions `WIN_IMPROPER_QUIT` (the last game did not end properly).**
+  Click **Nein** to start normally or **Ja** for safe mode; **Abbrechen** does not
+  start the game. The game keeps a marker file `__CoDSP` next to `CoDSP.exe`
+  while it runs and removes it on a normal exit — killing the process leaves it
+  behind. This is the stock game, not the mod; see
+  [docs/linux.md](docs/linux.md#after-a-crash-the-improper-quit-prompt).
 
 ## Uninstall
 

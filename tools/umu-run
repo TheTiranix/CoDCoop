@@ -36,9 +36,20 @@ printf '%s | %s\n' "$(date '+%F %T')" "$*" >> /tmp/umu-run-args.log 2>/dev/null
 # ---------------------------------------------------------------------------
 
 game_running() {
-  pgrep -f '[A-Za-z]:.*CoDSP\.exe' >/dev/null 2>&1 ||
-  pgrep -f '[A-Za-z]:.*CoDMP\.exe' >/dev/null 2>&1 ||
-  pgrep -f '[A-Za-z]:.*CoDUOSP\.exe' >/dev/null 2>&1
+  # Match the game process itself, not helpers such as
+  # "c:\windows\system32\steam.exe /mnt/.../CoDSP.exe".
+  for p in $(pgrep -f 'CoDSP\.exe|CoDMP\.exe|CoDUOSP\.exe' 2>/dev/null); do
+    [ "$p" = "$$" ] && continue
+    arg0=$( { tr '\0' '\n' < "/proc/$p/cmdline"; } 2>/dev/null | head -n 1 )
+    [ -n "$arg0" ] || continue
+    # Wine may report the full "Z:\...\CoDSP.exe" path or only the exe name.
+    exe=${arg0##*\\}
+    exe=${exe##*/}
+    case "$exe" in
+      CoDSP.exe|CoDMP.exe|CoDUOSP.exe) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 steam_running() {

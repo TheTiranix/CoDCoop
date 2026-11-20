@@ -211,6 +211,31 @@ The other message that can appear, `WIN_CONFIGURE_UPDATED`, compares
 `tools/install-linux.py` recomputes it. If you copy the game by hand, delete the
 `seta sys_configSum` line and the game writes it again.
 
+### After a crash: the "improper quit" prompt
+
+**Symptom:** the next start shows a dialog with the title
+`WIN_IMPROPER_QUIT_TITLE` and a body starting with `WIN_IMPROPER_QUIT_BODY`
+(raw tokens again, same missing `Main/localization.txt`). The buttons are
+**Ja** / **Nein** / **Abbrechen**.
+
+**Cause:** while the game runs it keeps a small marker file `__CoDSP` next to
+`CoDSP.exe` and deletes it on a normal exit. If the process was killed — task
+manager, `kill`, a crash, a launcher that force-stops the game — the marker
+stays behind and Call of Duty assumes the last session ended badly. This is the
+stock game, not the mod.
+
+**What to click:**
+
+| Button | Meaning |
+| --- | --- |
+| **Nein** | Start normally. Use this when the last session was fine and only the process was killed. |
+| **Ja** | Start in safe mode: video and sound are reset to safe defaults for this run. Use it if the game no longer reaches the menu. |
+| **Abbrechen** | Do not start the game. |
+
+After a normal start the marker is removed again. Deleting `__CoDSP` by hand has
+the same effect as **Nein**. Closing the game window normally (or quitting from
+the main menu) does not trigger the prompt.
+
 ## 6. Building the DLLs on Linux
 
 The sources are plain C++ and only need a MinGW cross compiler — no Wine, no

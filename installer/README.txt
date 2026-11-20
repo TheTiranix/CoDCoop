@@ -18,6 +18,9 @@ Install
 - First start: if Call of Duty asks whether the computer changed (WIN_COMPUTER_CHANGE
   or "your configuration has changed"), click "Ja" once. The game stores the hardware
   it detected and does not ask again.
+- After a crash: if the game mentions an "improper quit" (WIN_IMPROPER_QUIT), click
+  "Nein" to start normally, or "Ja" for safe mode (resets video and sound for that
+  start). Closing the game normally avoids the prompt; it is the stock game, not the mod.
 
 Call of Duty 2 (experimental)
 - Version 1.3 (CoD2SP_s.exe), with co-op installed on every PC.
