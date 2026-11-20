@@ -1,0 +1,98 @@
+#!/bin/sh
+# Workaround: Anker Launcher exports LD_LIBRARY_PATH/PYTHONHOME from its AppImage,
+# whose bundled libzstd.so.1 lacks ZSTD_defaultCLevel (Python 3.14 _zstd import fails).
+unset LD_LIBRARY_PATH LD_PRELOAD PYTHONHOME PYTHONPATH
+
+# Call of Duty (2003) / CoDCoop:
+# The 2003 engine copies the OpenGL extension string into a fixed-size stack
+# buffer. Modern drivers report far more extensions than that buffer holds, so
+# the stack gets corrupted and the MSVC runtime aborts the game with
+# "Buffer overrun detected!" right after video init.
+# Limiting the reported extension list to the GL 1.5 era fixes it.
+case "$* $WINEPREFIX $STEAM_COMPAT_DATA_PATH $PWD" in
+  *CoDSP.exe*|*CoDMP.exe*|*CoDUOSP.exe*|*"Call of Duty (2003)"*|*3278*)
+    export __GL_ExtensionStringVersion=15000   # NVIDIA proprietary driver
+    export MESA_EXTENSION_MAX_YEAR=2003        # Mesa (AMD/Intel/llvmpipe)
+    # The mod is loaded by its own ddraw.dll next to CoDSP.exe. Wine prefers
+    # its built-in one, so the mod would never load (no Co-op menu, no
+    # codcoop.log). Append to whatever the launcher/Proton already sets.
+    export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}ddraw=n,b"
+    ;;
+esac
+
+printf '%s | %s\n' "$(date '+%F %T')" "$*" >> /tmp/umu-run-args.log 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# Steam overlay / friends list
+#
+# Steam only injects its overlay (Shift+Tab, friends list) into games it
+# launches itself. A game started by a launcher (AnkerGames -> umu-run) has no
+# overlay, even though Steam shows "Playing Spacewar". If the game is registered
+# as a non-Steam game in Steam, hand the launch over to Steam: the game then
+# runs with the overlay, and this wrapper waits until it exits so the launcher
+# keeps showing it as running.
+#
+# COD_COOP_NO_STEAM=1 disables this and always uses umu-run.
+# ---------------------------------------------------------------------------
+
+game_running() {
+  pgrep -f '[A-Za-z]:.*CoDSP\.exe' >/dev/null 2>&1 ||
+  pgrep -f '[A-Za-z]:.*CoDMP\.exe' >/dev/null 2>&1 ||
+  pgrep -f '[A-Za-z]:.*CoDUOSP\.exe' >/dev/null 2>&1
+}
+
+steam_running() {
+  pgrep -x steam >/dev/null 2>&1 || pgrep -f steamwebhelper >/dev/null 2>&1
+}
+
+steam_launch() {
+  [ -n "$COD_COOP_NO_STEAM" ] && return 1
+  command -v steam >/dev/null 2>&1 || return 1
+  steam_running || return 1
+
+  helper="$(dirname "$0")/cod-coop-steam-id"
+  if [ ! -x "$helper" ]; then
+    helper="$(command -v cod-coop-steam-id 2>/dev/null)"
+  fi
+  [ -n "$helper" ] && [ -x "$helper" ] || return 1
+
+  id64=$("$helper" --exe "$1" 2>/dev/null) || return 1
+  [ -n "$id64" ] || return 1
+
+  if game_running; then
+    echo "CoD Coop: the game is already running."
+    return 0
+  fi
+
+  steam "steam://rungameid/$id64" >/dev/null 2>&1 &
+
+  # Wait for Steam to bring the game up (Proton can take a while), then keep
+  # this process alive until the game exits.
+  i=0
+  while [ "$i" -lt 180 ]; do
+    game_running && break
+    sleep 1
+    i=$((i + 1))
+  done
+  if ! game_running; then
+    echo "CoD Coop: Steam did not start the game within 3 minutes." >&2
+    echo "  Check the Steam shortcut and that Steam is signed in; the game may" >&2
+    echo "  still start. This time no second copy was started." >&2
+    return 0
+  fi
+  while game_running; do sleep 2; done
+  return 0
+}
+
+case "$1" in
+  *CoDSP.exe|*CoDMP.exe|*CoDUOSP.exe)
+    if steam_launch "$1"; then
+      exit 0
+    fi
+    echo "CoD Coop: no Steam shortcut for this install - starting without the" >&2
+    echo "  Steam overlay. Add the game once: Steam -> Games -> Add a Non-Steam" >&2
+    echo "  Game -> CoDSP.exe (see docs/linux.md)." >&2
+    ;;
+esac
+
+exec /usr/bin/umu-run "$@"

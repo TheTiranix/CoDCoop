@@ -44,10 +44,12 @@ Through Steam (no ports to open)
      (the co-op uses this free test app of Valve to talk to Steam). The installer
      offers to open it when it finishes.
   3. The game has to see Steam:
-     - Linux (Proton): start the game THROUGH Steam ("Add a Non-Steam Game" ->
-       CoDSP.exe, and set Proton for that entry). Starting it only from the
-       launcher does not see Steam and cannot invite. In the shortcut's
-       "Launch Options" put:
+     - Linux (Proton): add the game once as a non-Steam game ("Add a Non-Steam
+       Game" -> CoDSP.exe) and set Proton for that entry. The umu-run wrapper
+       from docs/linux.md then starts it through Steam when you press Play in the
+       launcher - that also gives you the Steam overlay and friends list. Without
+       the wrapper, a game started only from the launcher does not see Steam.
+       In the shortcut's "Launch Options" put:
          WINEDLLOVERRIDES="ddraw=n,b" __GL_ExtensionStringVersion=15000 MESA_EXTENSION_MAX_YEAR=2003 %command%
        WINEDLLOVERRIDES is required: without it Wine uses its own ddraw.dll and
        the mod is not loaded at all (no Co-op entry, no codcoop.log).
@@ -62,6 +64,9 @@ Through Steam (no ports to open)
 - The game log (codcoop.log) says "steam: listo como 'your name'" when the
   connection to Steam works. If it says "solo por IP", one of the three points
   above is missing.
+- Steam overlay / friends list (Shift+Tab): Steam only injects its overlay into
+  games it launches itself. With the umu-run wrapper and the non-Steam entry
+  above, the overlay works even when you start the game from AnkerGames.
 
 Over the internet by IP
 - The host has to open UDP port 28960 on their router (forwarded to their PC) and

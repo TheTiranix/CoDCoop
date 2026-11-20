@@ -42,30 +42,30 @@ export MESA_EXTENSION_MAX_YEAR=2003        # Mesa (AMD/Intel)
 ### Making it permanent with Proton
 
 Create a small wrapper that sets the variables only for Call of Duty and then
-calls the real `umu-run` (or `proton`). Example for a launcher that calls
-`~/.local/bin/umu-run`:
+calls the real `umu-run` (or `proton`). The repository ships it as
+[`tools/umu-run`](../tools/umu-run); install it together with the helper that
+finds the Steam entry:
 
 ```sh
-#!/bin/sh
-# some launchers export their own libraries; drop them so the host ones are used
-unset LD_LIBRARY_PATH LD_PRELOAD PYTHONHOME PYTHONPATH
-
-case "$* $WINEPREFIX $PWD" in
-  *CoDSP.exe*|*CoDMP.exe*|*CoDUOSP.exe*|*"Call of Duty"*)
-    export __GL_ExtensionStringVersion=15000
-    export MESA_EXTENSION_MAX_YEAR=2003
-    # the mod is loaded by its own ddraw.dll - Wine prefers its built-in one
-    export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}ddraw=n,b"
-    ;;
-esac
-
-exec /usr/bin/umu-run "$@"
+install -Dm755 tools/umu-run ~/.local/bin/umu-run
+install -Dm755 tools/steam-shortcut.py ~/.local/bin/cod-coop-steam-id
 ```
 
-The `WINEDLLOVERRIDES` line is what makes the mod load at all under a launcher:
-Wine otherwise uses its own `ddraw.dll` and the game starts without the mod (no
-*Co-op* entry in the menu, no `codcoop.log`). Appending to an existing value keeps
-whatever the launcher or Proton already sets for DXVK.
+The wrapper does three things:
+
+1. It exports the two OpenGL variables (above) and
+   `WINEDLLOVERRIDES="ddraw=n,b"`. The `WINEDLLOVERRIDES` line is what makes the
+   mod load at all under a launcher: Wine otherwise uses its own `ddraw.dll` and
+   the game starts without the mod (no *Co-op* entry in the menu, no
+   `codcoop.log`). Appending to an existing value keeps whatever the launcher or
+   Proton already sets for DXVK.
+2. If the game is registered as a non-Steam game in Steam, it hands the launch
+   over to Steam (`steam://rungameid/…`). That is what makes the Steam overlay
+   and the friends list (Shift+Tab) work — Steam only injects its overlay into
+   games it launches itself. The wrapper waits until the game exits, so the
+   launcher keeps showing it as running.
+3. Without a Steam entry it falls back to `umu-run`: the game and the mod work,
+   only the overlay/friends list is missing.
 
 Put it in place of the launcher's `umu-run` (back up the original first) and
 restart the launcher **completely**, including its tray icon — otherwise the old
@@ -113,12 +113,14 @@ on **every** PC, host and client:
    Spacewar"). Both installers offer to open it at the end; you can also do it
    yourself: `steam://install/480`.
 3. **The game sees Steam.**
-   * **Linux (Proton):** Steam only injects `steamclient.dll` into processes it
-     launched, so the game has to be started **through Steam**. Add it once:
-     **Games → Add a Non-Steam Game → Browse → `CoDSP.exe`**, then open the
-     shortcut's *Properties → Compatibility* and tick **Force the use of a
-     specific Steam Play compatibility tool** (Proton). Afterwards start the
-     game from that Steam entry, not from the launcher.
+   * **Linux (Proton):** Steam only injects `steamclient.dll` and the overlay
+     into processes it launched, so the game has to be started **through
+     Steam**. Add it once: **Games → Add a Non-Steam Game → Browse →
+     `CoDSP.exe`**, then open the shortcut's *Properties → Compatibility* and
+     tick **Force the use of a specific Steam Play compatibility tool**
+     (Proton). The wrapper from section 1 then uses that entry automatically
+     when you press Play in the launcher; you can also start the game directly
+     from Steam.
    * **Windows:** starting the game normally (also from AnkerGames or the
      desktop) is enough; the mod finds the running Steam by itself. Checking the
      box *Run this game with Steam* is not needed.
@@ -152,6 +154,25 @@ steam: listo como 'your Steam name' (7656119...)
 If it says `steam: no disponible ... solo por IP`, one of the three points is
 missing. Joining and hosting by IP still work in that case — use **Host IP** in
 the Co-op window and open **UDP 28960** (UDP 28962 for Call of Duty 2).
+
+### Friends list / overlay when starting from the launcher
+
+If the game is started by AnkerGames (or any launcher that calls `umu-run`),
+Steam shows "Playing Spacewar" but **Shift+Tab does nothing and the friends list
+is not available**. That is not a mod bug: Steam only injects its overlay into
+processes it launched itself.
+
+The wrapper from section 1 solves it: if `CoDSP.exe` exists as a non-Steam game
+in Steam, it hands the launch over to Steam and waits until the game exits. The
+prerequisites are the same as above (the non-Steam entry, Proton and the launch
+options). Start the game normally from AnkerGames; the wrapper uses the Steam
+entry, so the overlay and the friends list work, and AnkerGames keeps showing
+the game as running.
+
+If no Steam entry is found, the wrapper falls back to `umu-run`: the game and
+the mod work, only the overlay/friends list is missing. Add the entry once and
+restart the launcher. `tools/steam-shortcut.py` only reads Steam's
+`shortcuts.vdf` to find the existing entry; it does not create one.
 
 Linux ↔ Windows works: the invite goes through Steam, not through the game, so
 the two sides can run different operating systems, different launchers and

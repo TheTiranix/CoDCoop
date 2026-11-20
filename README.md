@@ -62,7 +62,12 @@ NVIDIA card and with Mesa/llvmpipe:
    — without it Wine uses its own `ddraw.dll` and the mod is not loaded (no
    *Co-op* entry, no `codcoop.log`). The ready-made wrapper is in
    [docs/linux.md](docs/linux.md), section 1.
-4. On the first start Call of Duty may ask whether the hardware changed (the
+4. **Steam overlay / friends list:** Steam only injects its overlay into games it
+   launches itself. The wrapper above hands the launch to Steam when `CoDSP.exe`
+   exists as a non-Steam game, so starting from AnkerGames still gives you
+   Shift+Tab and the friends list. Without that entry the game and the mod still
+   work, but the overlay is missing.
+5. On the first start Call of Duty may ask whether the hardware changed (the
    launcher's config comes from another PC). Click **Ja** once — the game then
    stores the values it detected and the question does not come back.
 
