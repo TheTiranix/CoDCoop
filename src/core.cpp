@@ -1306,6 +1306,26 @@ void SetDowned(int n, bool downed)
     DownedMessage(n, downed, 0);
 }
 
+// Recien levantado: unos segundos sin daño y sin que la IA le apunte, para que pueda cubrirse (bastogne1: con media
+// vida en el mismo lugar volvia a caer a los 6 s, una y otra vez)
+constexpr DWORD REVIVE_GRACE_MS = 3000;
+DWORD g_revivedAt[g::MAX_CLIENTS];
+bool InReviveGrace(int n) { return g_revivedAt[n] && GetTickCount() - g_revivedAt[n] < REVIVE_GRACE_MS; }
+
+// daño a los jugadores en el registro, una linea por segundo por jugador como mucho: cuanto y de donde
+struct DamageLog { DWORD last; int sum, count; } g_damageLog[g::MAX_CLIENTS];
+void LogDamage(int n, uint8_t* attacker, int damage, int mod, int left)
+{
+    DamageLog& d = g_damageLog[n];
+    d.sum += damage;
+    ++d.count;
+    DWORD now = GetTickCount();
+    if (now - d.last < 1000) return;
+    int a = attacker && g::sv_gentities && g::sv_gentitySize ? (int)(attacker - g::sv_gentities) / g::sv_gentitySize : -1;
+    Log("dano al jugador %d: %d en %d golpes (ultimo: atacante %d, medio %d) -> vida %d", n, d.sum, d.count, a, mod, left);
+    d = {now, 0, 0};
+}
+
 void __cdecl Hook_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, float* dir, float* point, int damage,
                           int dflags, int mod, int hitLoc)
 {
@@ -1321,7 +1341,7 @@ void __cdecl Hook_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, 
         g_origDamage(targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc);
         return;
     }
-    if (S->downed[n]) return;  // caido: ya no recibe daño
+    if (S->downed[n] || InReviveGrace(n)) return;  // caido o recien levantado: no recibe daño
     // El daño final depende de la zona del golpe (G_Damage lo escala): se aplica con la vida inflada para que
     // no muera adentro, se mide cuanto bajo y recien ahi se decide entre herido, caido o muerto.
     constexpr int BOOST = 100000;
@@ -1329,6 +1349,7 @@ void __cdecl Hook_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, 
     SetHealth(n, health + BOOST);
     g_origDamage(targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc);
     int left = *(int*)(targ + g::GE_HEALTH) - BOOST;
+    LogDamage(n, attacker, health - left, mod, left);
     if (left > 0) {
         SetHealth(n, left);
     } else if (AnyOtherStanding(n)) {
@@ -1431,6 +1452,10 @@ void HostDownedFrame(float dt)
 {
     int reviving[g::MAX_CLIENTS] = {-1, -1, -1, -1};  // a quien esta levantando cada jugador
     for (int n = 0; n < g::MAX_CLIENTS; ++n) {
+        if (g_revivedAt[n] && !InReviveGrace(n)) {  // termino la gracia: la IA lo vuelve a ver
+            g_revivedAt[n] = 0;
+            if (!S->downed[n]) *(int*)(g::Entity(n) + g::GE_FLAGS) &= ~FL_NOTARGET;
+        }
         if (!S->downed[n]) continue;
         if (!PlayerInGame(n) || !CoopActive()) { SetDowned(n, false); continue; }
         SetHealth(n, 1);
@@ -1450,6 +1475,8 @@ void HostDownedFrame(float dt)
         if (S->reviveTime[n] >= REVIVE_SECONDS) {
             SetDowned(n, false);
             SetHealth(n, *(int*)(PlayerState(n) + g::PS_MAXHEALTH) / 2);
+            g_revivedAt[n] = GetTickCount();
+            *(int*)(g::Entity(n) + g::GE_FLAGS) |= FL_NOTARGET;  // hasta que termine la gracia
             AnnounceDowned(n, false);
         } else if (reviver >= 0) {
             reviving[reviver] = n;
@@ -1574,6 +1601,12 @@ void HostVehicles()
         if ((link ? *(uint8_t**)link : nullptr) == parent) continue;
         if (link) {
             EntUnlink(game + g::G_ENTUNLINK, ent);
+            if (!parent) {  // el host se bajo: a su lado (los jugadores no chocan); en su asiento quedaba trabado
+                const float* h = (const float*)(PlayerState(0) + 0x14);  // en la colision del vehiculo (bastogne1)
+                memcpy(PlayerState(n) + 0x14, h, 12);
+                memset(PlayerState(n) + 0x20, 0, 12);  // velocidad
+                memcpy(ent + g::GE_ORIGIN, h, 12);
+            }
             Log("jugador %d: se baja del vehiculo", n);
         }
         if (!parent || g_linkFailed[n] == parent) continue;
