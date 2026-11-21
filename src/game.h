@@ -91,6 +91,9 @@ inline int& sv_gameClientSize = *(int*)A(0x152bc68, 0x47fefc8);
 inline int& sv_state = *(int*)A(0x14f4840, 0x47c7ba0);        // 2 = jugando
 inline uint16_t* sv_configstrings = (uint16_t*)A(0x14f4c54, 0x47c7fb4);
 inline int& sv_time = *(int*)A(0x152e930, 0x4801c90);
+// ms de juego que avanzo este frame: lo deja SV_Frame y CL_CGameRendering (CoD1 0x404810, UO 0x405170) se lo pasa a
+// CG_DrawActiveFrame, que con eso avanza las animaciones del lado cliente entre snapshots (trap 147 -> 0x47cc90)
+inline int& sv_animFrametime = *(int*)A(0x1439384, 0x4842224);
 inline int& snap_numEntities = *(int*)A(0x152bcd4, 0x47ff034);  // lista global del ultimo snapshot construido
 inline int* snap_entities = (int*)A(0x152bcd8, 0x47ff038);
 inline uint8_t*& gvm = *(uint8_t**)A(0x13f9db8, 0x37c07a4);

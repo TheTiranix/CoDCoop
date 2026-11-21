@@ -2742,13 +2742,16 @@ EXPORT int __cdecl Coop_FrozenFrame(int msec)
     if (!S->frozen) return 0;  // se perdio el host
     DrawTeamOnCompass(g_team, g_teamPos, S->slot);
     int& t = S->frozenTime;
-    int latest = g::cl_snapServerTime;
+    int latest = g::cl_snapServerTime, before = t;
     int target = latest - 50;
     t += msec;
     if (t < target - 300) t = target;  // al entrar o tras un corte: salto
     else if (t > latest) t = latest;   // nunca adelante del ultimo snapshot
     else if (t < target - 10) t += 1;  // se acerca de a poco
     g::sv_time = t;
+    // sin esto quedaba en 0 (SV_Frame no corre) y el cliente no avanzaba las animaciones entre los M_ANIM del host:
+    // soldados y jugadores se movian a 20 cuadros por segundo
+    g::sv_animFrametime = t > before && t - before < 300 ? t - before : 0;
     g::Com_SyncClientDObjs();           // lo hace un trap del juego, que aca no corre
     return 1;
 }
