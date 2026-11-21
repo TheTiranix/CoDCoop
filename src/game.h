@@ -201,6 +201,9 @@ inline void XAnimFreeInfo(uint8_t* tree, int index)
 {
     asm volatile("call *%2" : "+D"(index), "+b"(tree) : "r"((void*)A(0x47a310, 0x47ecb0)) : "eax", "ecx", "edx", "memory");
 }
+// cvar r_errorOnConflicts: con el nivel ya cargado, un modelo nuevo es el error "model '%s' not precached" (CoD1
+// 0x4e40ea, UO 0x4ff082); en 0 el renderer lo carga igual
+inline uint8_t*& r_errorOnConflicts = *(uint8_t**)A(0x1534554, 0x47bdea0);
 inline uint8_t* XModelPrecache(const char* name)  // ECX = nombre sin "xmodel/", (0, alloc, 0)
 {
     uint8_t* r;

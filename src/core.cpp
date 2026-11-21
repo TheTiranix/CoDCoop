@@ -801,7 +801,13 @@ void JoinerApplyDObj(Reader r)
         if (!GetStr(r, name, sizeof name)) return;
         parents[k] = r.Get<uint8_t>();
         models[k].flags = r.Get<uint16_t>();
-        models[k].model = g::XModelPrecache(name);  // si no estaba cargado lo carga
+        // si no estaba cargado lo carga: el host puede usar modelos que el nivel de aca no cargo (UO bastogne1 tras
+        // una mision fallida: gear_US_carbinebelt), y con el nivel cargado eso sacaba al que se une con un error
+        int* strict = g::r_errorOnConflicts ? (int*)(g::r_errorOnConflicts + 0x20) : nullptr;
+        int prev = strict ? *strict : 0;
+        if (strict) *strict = 0;
+        models[k].model = g::XModelPrecache(name);
+        if (strict) *strict = prev;
         if (!models[k].model || _stricmp(SafeStr(*(char**)models[k].model), name) != 0) {
             Log("dobj %d: modelo '%s' no resuelto", e, name);
             return;
@@ -1552,14 +1558,18 @@ void HostVehicles()
         uint8_t* link = *(uint8_t**)(ent + g::GE_LINK);
         // pasajero con las manos vacias (tanques: el host no tiene arma de infanteria): un arma del nivel
         int& held = *(int*)(PlayerState(n) + g::PS_WEAPON);
-        if (parent && (!held || VehicleWeapon(held)) && g_weaponTried[n] != parent) {
+        bool hostArmed = *(int*)(PlayerState(0) + g::PS_WEAPON) != 0;  // al empezar el nivel el script todavia no le dio
+        if (parent && hostArmed && (!held || VehicleWeapon(held)) && g_weaponTried[n] != parent) {
             if (held) {  // el cañón copiado del host antes de este arreglo: fuera de la mano y de la lista
                 *(uint32_t*)(PlayerState(n) + g::PS_WEAPONS + held / 32 * 4) &= ~(1u << (held % 32));
                 held = 0;
             }
             g_weaponTried[n] = parent;
-            if (int w = PickLoadedWeapon(game)) GiveWeapon(game, n, w);
-            else Log("jugador %d: el nivel no tiene armas de infanteria cargadas", n);
+            GiveHostLoadout(n);  // jeep o camion: el host lleva su arma (bastogne1 daba una thompson con el host de garand)
+            if (!held) {
+                if (int w = PickLoadedWeapon(game)) GiveWeapon(game, n, w);
+                else Log("jugador %d: el nivel no tiene armas de infanteria cargadas", n);
+            }
         }
         if ((link ? *(uint8_t**)link : nullptr) == parent) continue;
         if (link) {
@@ -2690,7 +2700,9 @@ EXPORT void __cdecl Coop_HostFrame()
     lastTime = now;
     if (dt < 0 || dt > 0.2f) dt = 0;
     HostUpdateBodies();
-    HostAnimateBodies(dt);
+    // solo en los frames del servidor, como el motor con la IA: entre uno y otro el cgame avanza el lado cliente de
+    // cada DObj del snapshot (trap 147); copiarlo del servidor en cada frame lo dejaba a 20 cuadros por segundo
+    if (dt > 0) HostAnimateBodies(dt);
     HostDownedFrame(dt);
     HostVehicles();
     if (CoopActive()) HostCatchUp(dt);
