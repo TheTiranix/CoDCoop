@@ -733,25 +733,42 @@ bool XAnimLoaded(const uint8_t* xanim)
     return false;
 }
 
-// UO: al recargar el mapa los arboles propios no se liberan con el DObj (el servidor local corre un frame mas y
-// los usa), pero tampoco los suelta el motor. Se sueltan sus infos ya, y el bloque con el mapa nuevo cargado
-// (JoinerHijack); el tamano se toma ahora, porque despues el XAnim del arbol ya no existe.
-struct OldTree { int index, bytes; };
-OldTree g_oldTrees[g::MAX_GENTITIES];
+// Los arboles propios (DObj copiados del host en el que se une, cuerpos en el host) van al heap y no a la memoria de
+// los scripts (65536 bloques de 8 bytes): un soldado son 9 KB que el asignador redondea a 16 KB, y en UO bastogne1 el
+// que se une se quedaba sin esa memoria al bajarse del jeep y ver mas soldados ("MT_AllocIndex: failed allocation of
+// 9206 bytes for script usage"). El juego no los libera ni los guarda: solo los usa por el DObj.
+uint8_t* CreateOwnTree(uint8_t* xanim)
+{
+    uint8_t* tree = (uint8_t*)calloc(1, g::TreeBytes(xanim));
+    if (tree) *(uint8_t**)tree = xanim;
+    return tree;
+}
+// Con el XAnim ya descargado (el juego recargo los assets al volver a entrar tras un checkpoint) sus infos ya no
+// existen: solo se suelta la memoria.
+void FreeOwnTree(uint8_t* tree)
+{
+    if (XAnimLoaded(*(uint8_t**)tree)) FreeTreeInfos(tree);
+    free(tree);
+}
+
+// Al recargar el mapa los arboles propios no se liberan con el DObj (el servidor local corre un frame mas y los
+// usa): se guardan y se liberan con el mapa nuevo cargado (JoinerHijack). UO suelta sus infos ya (CoD1 las limpia al
+// cargar el mapa).
+uint8_t* g_oldTrees[g::MAX_GENTITIES];
 int g_oldTreeCount;
 void KeepOldTrees()
 {
     for (int e = 0; e < g::MAX_GENTITIES; ++e) {
         uint8_t* tree = S->ownTree[e];
-        if (!tree || !XAnimLoaded(*(uint8_t**)tree) || g_oldTreeCount >= g::MAX_GENTITIES) continue;
-        FreeTreeInfos(tree);
-        g_oldTrees[g_oldTreeCount++] = {(int)(((uintptr_t)tree - g::UO_TREE_BASE) >> 3), g::TreeBytes(*(uint8_t**)tree)};
+        if (!tree || g_oldTreeCount >= g::MAX_GENTITIES) continue;
+        if (g::uo && XAnimLoaded(*(uint8_t**)tree)) FreeTreeInfos(tree);
+        g_oldTrees[g_oldTreeCount++] = tree;
     }
 }
 void FreeOldTrees()
 {
     if (g_oldTreeCount) Log("joiner: libero %d arboles del mapa anterior", g_oldTreeCount);
-    for (int i = 0; i < g_oldTreeCount; ++i) g::UO_FreeTreeBlock(g_oldTrees[i].index, g_oldTrees[i].bytes);
+    for (int i = 0; i < g_oldTreeCount; ++i) free(g_oldTrees[i]);
     g_oldTreeCount = 0;
 }
 
@@ -761,16 +778,7 @@ void JoinerFreeDObj(int e)
     S->ownTree[e] = nullptr;
     if (g::serverObjMap[e]) g::Com_ServerDObjFree(e);
     g::Com_SyncClientDObjs();
-    // un arbol hecho con un XAnim que ya no esta en la tabla (el juego recargo los assets al volver a entrar tras un
-    // checkpoint) vive en memoria ya liberada: liberarlo de nuevo rompia el juego (0x45b8f0). Se olvida.
-    if (tree && (IsBadReadPtr(tree, 4) || !XAnimLoaded(*(uint8_t**)tree))) {
-        Log("dobj %d: arbol de antes de la recarga, se olvida", e);
-        return;
-    }
-    if (tree) {
-        FreeTreeInfos(tree);
-        g::XAnimFreeTree(tree);
-    }
+    if (tree) FreeOwnTree(tree);
 }
 
 uint8_t* FindXAnim(const char* name)
@@ -814,7 +822,7 @@ void JoinerApplyDObj(Reader r)
     for (int k = 0; same && k < nm; ++k) same = *(void**)(d + g::DO_MODELS + k * 4) == models[k].model;
     if (!same) {
         JoinerFreeDObj(e);
-        uint8_t* tree = xanim ? g::XAnimCreateTree(xanim) : nullptr;
+        uint8_t* tree = xanim ? CreateOwnTree(xanim) : nullptr;
         S->ownTree[e] = tree;
         DObjCreate(models, nm, tree, e, u12);
         d = g::ServerDObj(e);
@@ -951,7 +959,7 @@ void HostCreateBody(int n)
         models[count++].flags = (uint16_t)-ModelIndex(weapon);
     }
     uint8_t* xanim = FindXAnim("generic_human.atr");
-    uint8_t* tree = xanim ? g::XAnimCreateTree(xanim) : nullptr;
+    uint8_t* tree = xanim ? CreateOwnTree(xanim) : nullptr;
     DObjCreate(models, count, tree, n, 0);
     S->bodyTree[n] = tree;
     Log("cuerpo %d: creado (%s + %s%s%s, arma '%s')", n, ModelName(parts[0]), ModelName(parts[1]), parts[2] ? " + " : "",
@@ -975,10 +983,7 @@ void HostFreeBody(int n)
     S->bodyTree[n] = nullptr;
     if (g::serverObjMap[n]) g::Com_ServerDObjFree(n);
     g::Com_SyncClientDObjs();
-    if (tree) {
-        FreeTreeInfos(tree);
-        g::XAnimFreeTree(tree);
-    }
+    if (tree) FreeOwnTree(tree);
     Log("cuerpo %d: borrado", n);
 }
 
@@ -2038,7 +2043,7 @@ void JoinerControl(uint8_t type, Reader r)
         const char* map = MapName(r);
         bool newMap = *map && _stricmp(map, S->hostMap) != 0;
         if (*map) snprintf(S->hostMap, sizeof S->hostMap, "%s", map);
-        if (g::uo) KeepOldTrees();
+        KeepOldTrees();
         memset(S->ownTree, 0, sizeof S->ownTree);
         S->joined = S->frozen = false;
         S->role = NONE;  // hasta cooprejoin: no se manda nada mientras carga
