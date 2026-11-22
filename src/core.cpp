@@ -498,7 +498,8 @@ bool IsGhost(int n)
     return !S->remote[n].active && !*(int*)(g::Client(n) + g::CL_STATE) && *(int*)(g::PlayerState(n) + g::GC_CONNECTED);
 }
 
-void HostDropGhosts()
+// wait = 0 sin coop (partida cargada jugando solo): nadie puede volver a entrar
+void HostDropGhosts(DWORD wait = GHOST_WAIT_MS)
 {
     uint8_t* reloading = g::Cvar_FindVar("g_reloading");
     if (g::sv_state != 2 || !g::svs_clients || !g::sv_gameClients || (reloading && *(int*)(reloading + 0x20))) return;
@@ -509,8 +510,8 @@ void HostDropGhosts()
         }
         DWORD now = GetTickCount();
         if (!g_ghostSince[n]) g_ghostSince[n] = now ? now : 1;  // sin "| 1": quedaba 1 ms adelante y la resta daba enorme
-        if (now - g_ghostSince[n] < GHOST_WAIT_MS) continue;
-        Log("host: nadie retomo al jugador %d de la partida cargada en %lu s, se desconecta", n, GHOST_WAIT_MS / 1000);
+        if (now - g_ghostSince[n] < wait) continue;
+        Log("nadie retomo al jugador %d de la partida cargada en %lu s, se desconecta", n, wait / 1000);
         g_ghostSince[n] = 0;
         g::GameCall(4, n);
     }
@@ -2039,7 +2040,8 @@ void CALLBACK OnDllNotification(ULONG reason, const LdrDll* dll, void*)
     if (!name || name->Length != wcslen(want) * 2 || _wcsnicmp(name->Buffer, want, name->Length / 2)) return;
     Log("modulo de juego %s en %p", reason == 1 ? "cargado" : "descargado", dll->DllBase);
     if (reason == 1) ++g_gameDllLoads;
-    if (reason == 1 && S && S->role == HOST) HookLoad(dll->DllBase, true);
+    // tambien sin coop: una partida guardada con remotos tiene que cargar jugando solo (o antes de "Host")
+    if (reason == 1) HookLoad(dll->DllBase, true);
     if (reason != 1 && dll->DllBase == g_damageHooked) g_damageHooked = nullptr;
 }
 
@@ -3047,7 +3049,10 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
     StatsTick();
     SteamFrame();
     UiPausedFrame();
-    if (S->sock == INVALID_SOCKET) return 0;
+    if (S->sock == INVALID_SOCKET) {  // sin coop: los jugadores guardados de una partida coop se van enseguida
+        if (sock == NS_SERVER) HostDropGhosts(0);
+        return 0;
+    }
     FlushDelayed();
     if (S->role == HOST && sock == NS_SERVER) {  // corre aunque el juego este en pausa
         HostCheckReload();
