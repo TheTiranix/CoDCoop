@@ -825,6 +825,24 @@ uint8_t* FindXAnim(const char* name)
     return nullptr;
 }
 
+// r_errorOnConflicts: con el nivel ya cargado, un modelo nuevo es el error "model '%s' not precached". El que se une
+// recibe modelos que su nivel local no cargo (configstrings, armas y cuerpos del host: weapon_luger y
+// gear_US_carbinebelt al pasar de burnville a dawnville, el host trae armas del nivel anterior); mientras esta unido
+// el renderer los carga igual.
+void AllowLateModels(bool on)
+{
+    static int saved = -1;
+    int* strict = g::r_errorOnConflicts ? (int*)(g::r_errorOnConflicts + 0x20) : nullptr;
+    if (!strict) return;
+    if (on) {
+        if (saved < 0) saved = *strict;
+        *strict = 0;
+    } else if (saved >= 0) {
+        *strict = saved;
+        saved = -1;
+    }
+}
+
 void JoinerApplyDObj(Reader r)
 {
     ModelEntry models[8] = {};
@@ -836,13 +854,7 @@ void JoinerApplyDObj(Reader r)
         if (!GetStr(r, name, sizeof name)) return;
         parents[k] = r.Get<uint8_t>();
         models[k].flags = r.Get<uint16_t>();
-        // si no estaba cargado lo carga: el host puede usar modelos que el nivel de aca no cargo (UO bastogne1 tras
-        // una mision fallida: gear_US_carbinebelt), y con el nivel cargado eso sacaba al que se une con un error
-        int* strict = g::r_errorOnConflicts ? (int*)(g::r_errorOnConflicts + 0x20) : nullptr;
-        int prev = strict ? *strict : 0;
-        if (strict) *strict = 0;
-        models[k].model = g::XModelPrecache(name);
-        if (strict) *strict = prev;
+        models[k].model = g::XModelPrecache(name);  // si no estaba cargado lo carga (ver AllowLateModels)
         if (!models[k].model || _stricmp(SafeStr(*(char**)models[k].model), name) != 0) {
             Log("dobj %d: modelo '%s' no resuelto", e, name);
             return;
@@ -2354,6 +2366,7 @@ void JoinerHijack()
     SaveLocalStates();                             // antes de que M_ENTS los pise (se reponen al cerrar el mapa local)
     S->frozen = true;                              // el servidor local queda solo para colision y assets
     HookVmCall(true);
+    AllowLateModels(true);                         // antes de los configstrings del host
     *(int*)(g::Client(0) + g::CL_STATE) = 0;      // que no acumule comandos que nadie confirma
     for (int i = 0; i < g::MAX_CONFIGSTRINGS; ++i)
         if (strcmp(g::ConfigString(i), S->cs[i]) != 0) g::SV_SetConfigstring(i, S->cs[i]);
@@ -2447,6 +2460,7 @@ void JoinerControl(uint8_t type, Reader r)
         KeepOldTrees();
         memset(S->ownTree, 0, sizeof S->ownTree);
         S->joined = S->frozen = false;
+        AllowLateModels(false);
         S->role = NONE;  // hasta cooprejoin: no se manda nada mientras carga
         memset(S->downed, 0, sizeof S->downed);
         Log("joiner: el host carga %s (%s), lo cargo y vuelvo a entrar", S->hostMap, newMap ? "nivel nuevo" : "checkpoint");
@@ -2507,6 +2521,7 @@ void JoinerLeave(const char* why)
     for (int e = 0; e < g::MAX_GENTITIES; ++e)
         if (S->ownTree[e]) JoinerFreeDObj(e);
     S->joined = S->frozen = false;
+    AllowLateModels(false);
     S->role = NONE;
     HookCgame(false);  // como un juego recien abierto: si no, el mapa local no termina de cargar al volver a entrar
     HookUsercmd(false);
