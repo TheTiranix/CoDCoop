@@ -312,6 +312,28 @@ static void LogGameError()
     Log("error del juego: %s", e);
 }
 
+// Com_Error (CoD1 0x42e660, UO 0x4302f0): de donde vino cada error, para los que salen del modulo de juego sin
+// cerrar el juego (el camion del convoy en el que se une, tras cargar partida). El texto lo pone LogGameError.
+extern "C" void* g_trampComError;
+void* g_trampComError;
+extern "C" void __cdecl ComErrorStack(const uint32_t* sp)  // sp[0] retorno, sp[1] nivel, sp[2] formato
+{
+    char line[1024];
+    crashlog::Stack(sp, line, sizeof line);
+    const char* fmt = IsBadReadPtr((const void*)sp[2], 1) ? "?" : (const char*)sp[2];
+    Log("error del juego (nivel %d, \"%.60s\") desde:%s", (int)sp[1], fmt, line);
+}
+extern "C" void Hook_ComError();
+asm(".globl _Hook_ComError\n"
+    "_Hook_ComError:\n\t"
+    "pushal\n\t"
+    "leal 32(%esp), %eax\n\t"
+    "pushl %eax\n\t"
+    "call _ComErrorStack\n\t"
+    "addl $4, %esp\n\t"
+    "popal\n\t"
+    "jmp *_g_trampComError\n");
+
 static void __cdecl Hook_SvFrame(int msec)  // en cada frame, tambien en el menu
 {
     LogGameError();
@@ -334,6 +356,20 @@ static void InstallHooks()
     g_origSvFrame = (void (*)(int))hook::Inline(svFrame, (void*)Hook_SvFrame, 6);
     Log("ganchos (%s): send %p getloop %p sendmsgs %p svframe %p", g::uo ? "UO" : "CoD1", g_trampSend, g_trampGetLoop,
         (void*)g_origSendClientMessages, (void*)g_origSvFrame);
+    // Un comando para un cliente sin buffer de comandos (ya liberado: un remoto soltado al fallar la mision mientras
+    // el juego todavia le habla) era "Reliable command buffer overflow" y el host volvia al menu (UO bastogne1). Se
+    // descarta: el `call` del aviso pasa a `jmp` al final de la funcion (CoD1 0x44bc80, UO 0x44ded0), que saca los
+    // mismos 5 registros que guardo.
+    uintptr_t err = g::A(0x44bc8e, 0x44dede), end = g::A(0x44be0d, 0x44e05d);
+    if (*(uint8_t*)err == 0xE8 && Expect(err + 5, g::uo ? "\x68\xE0\xCE\x54\x00" : "\x68\xBC\x2D\x55\x00", 5) &&
+        Expect(end, "\x5F\x5E\x5D\x5B\x59\xC3", 6)) {
+        uint8_t jmp[5] = {0xE9};
+        *(int32_t*)(jmp + 1) = (int32_t)(end - (err + 5));
+        hook::Write(err, jmp, 5);
+        Log("comandos a clientes sin buffer: se descartan");
+    }
+    uintptr_t comError = g::A(0x42e660, 0x4302f0);
+    if (Expect(comError, "\xB8\x10\x10\x00\x00", 5)) g_trampComError = hook::Inline(comError, (void*)Hook_ComError, 5);
 }
 
 // Crash sin manejar: direccion y posibles direcciones de retorno de la pila como modulo+desplazamiento

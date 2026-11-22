@@ -486,19 +486,37 @@ void CheckPathLists(const char* when)
     Log("listas de caminos %s: %d, rotas %d", when, lists, bad);
 }
 
-// Un checkpoint guardado con remotos los carga como jugadores del juego sin cliente del motor (HookLoad). Con la
-// partida ya cargada se desconectan (ClientDisconnect, vmMain 4): el remoto vuelve a entrar como al empezar el nivel.
+// Un checkpoint guardado con remotos los carga como jugadores del juego sin cliente del motor (HookLoad): el "jugador
+// guardado". El remoto que vuelve a entrar lo retoma (HostJoin: lugar, vida y armas de la partida). Si en
+// GHOST_WAIT_MS nadie lo retoma se desconecta (ClientDisconnect, vmMain 4); mientras espera no recibe daño.
+constexpr DWORD GHOST_WAIT_MS = 60000;
+DWORD g_ghostSince[g::MAX_CLIENTS];
+
+bool IsGhost(int n)
+{
+    if (!g::svs_clients || !g::sv_gameClients) return false;
+    return !S->remote[n].active && !*(int*)(g::Client(n) + g::CL_STATE) && *(int*)(g::PlayerState(n) + g::GC_CONNECTED);
+}
+
 void HostDropGhosts()
 {
     uint8_t* reloading = g::Cvar_FindVar("g_reloading");
     if (g::sv_state != 2 || !g::svs_clients || !g::sv_gameClients || (reloading && *(int*)(reloading + 0x20))) return;
     for (int n = 1; n < g::MAX_CLIENTS; ++n) {
-        if (S->remote[n].active || *(int*)(g::Client(n) + g::CL_STATE) || !*(int*)(g::PlayerState(n) + g::GC_CONNECTED))
+        if (!IsGhost(n)) {
+            g_ghostSince[n] = 0;
             continue;
-        Log("host: el jugador %d vino en el checkpoint sin nadie en ese lugar, se desconecta", n);
+        }
+        DWORD now = GetTickCount();
+        if (!g_ghostSince[n]) g_ghostSince[n] = now ? now : 1;  // sin "| 1": quedaba 1 ms adelante y la resta daba enorme
+        if (now - g_ghostSince[n] < GHOST_WAIT_MS) continue;
+        Log("host: nadie retomo al jugador %d de la partida cargada en %lu s, se desconecta", n, GHOST_WAIT_MS / 1000);
+        g_ghostSince[n] = 0;
         g::GameCall(4, n);
     }
 }
+
+void PlaceJoined(int n);
 
 void HostJoin(const sockaddr_in& from, Reader r)
 {
@@ -518,13 +536,16 @@ void HostJoin(const sockaddr_in& from, Reader r)
     }
     int n = FindSlot(from);
     if (n < 0) {
-        for (int i = 1; i < g::MAX_CLIENTS; ++i)
-            if (*(int*)(g::Client(i) + g::CL_STATE) == 0) { n = i; break; }
+        for (int i = 1; i < g::MAX_CLIENTS && n < 0; ++i)  // primero un jugador guardado que nadie retomo
+            if (IsGhost(i)) n = i;
+        for (int i = 1; i < g::MAX_CLIENTS && n < 0; ++i)
+            if (*(int*)(g::Client(i) + g::CL_STATE) == 0) n = i;
         if (n < 0) {
             Writer w(M_FULL);
             SendTo(from, w.buf, w.len);
             return;
         }
+        bool ghost = IsGhost(n);
         Remote* rm = &S->remote[n];
         memset(rm, 0, sizeof *rm);
         memset(rm->dobjSig, 0xff, sizeof rm->dobjSig);  // la primera vez se manda todo, incluso "sin DObj"
@@ -554,29 +575,43 @@ void HostJoin(const sockaddr_in& from, Reader r)
         *(int*)(cl + g::CL_GAMESTATEMSG) = *(int*)(nc + g::NC_OUT);
         *(int*)(cl + g::CL_STATE) = 1;
 
-        // como SV_ClientEnterWorld (0x448e40), que tiene el ClientConnect fijo en 0
-        // ClientConnect (gamex86 RVA 0x14800) empieza reiniciando el sistema de caminos de la IA (call 0x6fde0 en
-        // RVA 0x14808): en el SP pasa una vez al cargar el mapa. Mas tarde deja a las puertas que bloquean caminos
-        // apuntando a nodos liberados, y la carga de partida se cuelga en G_FreeEntity. Para los remotos se saltea.
-        uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
-        uint8_t* call = game ? game + g::G_CONNECT_PATHINIT : nullptr;
-        uint8_t saved[5] = {};
-        bool skip = call && call[0] == 0xE8 && call + 5 + *(int32_t*)(call + 1) == game + g::G_PATHINIT;
-        if (skip) {
-            memcpy(saved, call, 5);
-            hook::Write((uintptr_t)call, "\x0F\x1F\x44\x00\x00", 5);  // nop de 5 bytes
+        // El jugador guardado de la partida cargada ya esta en el juego (con su lugar, vida y armas): solo le faltaba el
+        // cliente del motor. ClientConnect/ClientBegin lo volverian a poner nuevo en el inicio del mapa.
+        if (ghost) {
+            g_ghostSince[n] = 0;
+            *(uint8_t**)(cl + g::CL_GENTITY) = g::Entity(n);
+            *(int*)(cl + g::CL_DELTA) = -1;
+            FixClientNum(n);
+            const float* o = (const float*)(g::PlayerState(n) + 0x14);
+            Log("host: jugador remoto %s:%d retoma al jugador %d de la partida cargada (%.0f %.0f %.0f, vida %d)",
+                inet_ntoa(from.sin_addr), ntohs(from.sin_port), n, o[0], o[1], o[2], *(int*)(g::Entity(n) + g::GE_HEALTH));
+            g::Com_Printf("^2COOP: a player rejoined (slot %d)\n", n);
         } else {
-            Log("ClientConnect: no se encontro la llamada a la init de caminos; se llama completo");
+            // como SV_ClientEnterWorld (0x448e40), que tiene el ClientConnect fijo en 0
+            // ClientConnect (gamex86 RVA 0x14800) empieza reiniciando el sistema de caminos de la IA (call 0x6fde0 en
+            // RVA 0x14808): en el SP pasa una vez al cargar el mapa. Mas tarde deja a las puertas que bloquean caminos
+            // apuntando a nodos liberados, y la carga de partida se cuelga en G_FreeEntity. Para los remotos se saltea.
+            uint8_t* game = (uint8_t*)GetModuleHandleA(g::GameDll());
+            uint8_t* call = game ? game + g::G_CONNECT_PATHINIT : nullptr;
+            uint8_t saved[5] = {};
+            bool skip = call && call[0] == 0xE8 && call + 5 + *(int32_t*)(call + 1) == game + g::G_PATHINIT;
+            if (skip) {
+                memcpy(saved, call, 5);
+                hook::Write((uintptr_t)call, "\x0F\x1F\x44\x00\x00", 5);  // nop de 5 bytes
+            } else {
+                Log("ClientConnect: no se encontro la llamada a la init de caminos; se llama completo");
+            }
+            g::GameCall(2, n);
+            if (skip) hook::Write((uintptr_t)call, saved, 5);
+            CheckPathLists("despues de ClientConnect");
+            *(uint8_t**)(cl + g::CL_GENTITY) = g::Entity(n);
+            *(int*)(cl + g::CL_DELTA) = -1;
+            g::GameCall(3, n);
+            FixClientNum(n);
+            Log("host: jugador remoto %s:%d -> slot %d (qport %d)", inet_ntoa(from.sin_addr), ntohs(from.sin_port), n, qport);
+            PlaceJoined(n);
+            g::Com_Printf("^2COOP: a player joined (slot %d)\n", n);
         }
-        g::GameCall(2, n);
-        if (skip) hook::Write((uintptr_t)call, saved, 5);
-        CheckPathLists("despues de ClientConnect");
-        *(uint8_t**)(cl + g::CL_GENTITY) = g::Entity(n);
-        *(int*)(cl + g::CL_DELTA) = -1;
-        g::GameCall(3, n);
-        FixClientNum(n);
-        Log("host: jugador remoto %s:%d -> slot %d (qport %d)", inet_ntoa(from.sin_addr), ntohs(from.sin_port), n, qport);
-        g::Com_Printf("^2COOP: a player joined (slot %d)\n", n);
     }
     Writer w(M_ACCEPT);
     w.Put<int>(n);
@@ -1311,6 +1346,7 @@ void SetDowned(int n, bool downed)
 constexpr DWORD REVIVE_GRACE_MS = 3000;
 DWORD g_revivedAt[g::MAX_CLIENTS];
 bool InReviveGrace(int n) { return g_revivedAt[n] && GetTickCount() - g_revivedAt[n] < REVIVE_GRACE_MS; }
+bool InJoinGrace();
 
 // daño a los jugadores en el registro, una linea por segundo por jugador como mucho: cuanto y de donde
 struct DamageLog { DWORD last; int sum, count; } g_damageLog[g::MAX_CLIENTS];
@@ -1337,11 +1373,12 @@ void __cdecl Hook_GDamage(uint8_t* targ, uint8_t* inflictor, uint8_t* attacker, 
         return;  // un jugador no lastima a otro (si a si mismo, como en el SP)
     }
     int n = targPlayer ? *(uint16_t*)(targ + 6) : -1;
+    if (n > 0 && n < g::MAX_CLIENTS && S->role == HOST && IsGhost(n)) return;  // jugador guardado esperando a su dueño
     if (n < 0 || n >= g::MAX_CLIENTS || !CoopActive()) {
         g_origDamage(targ, inflictor, attacker, dir, point, damage, dflags, mod, hitLoc);
         return;
     }
-    if (S->downed[n] || InReviveGrace(n)) return;  // caido o recien levantado: no recibe daño
+    if (S->downed[n] || InReviveGrace(n) || InJoinGrace()) return;  // caido, recien levantado o alguien recien entro
     // El daño final depende de la zona del golpe (G_Damage lo escala): se aplica con la vida inflada para que
     // no muera adentro, se mide cuanto bajo y recien ahi se decide entre herido, caido o muerto.
     constexpr int BOOST = 100000;
@@ -1529,11 +1566,25 @@ float Dist2(const float* a, const float* b)
     return dx * dx + dy * dy + dz * dz;
 }
 
+void MoveRemote(int n, const float* spot)
+{
+    memcpy(PlayerState(n) + 0x14, spot, 12);
+    memset(PlayerState(n) + 0x20, 0, 12);           // velocidad
+    memcpy(g::Entity(n) + g::GE_ORIGIN, spot, 12);  // r.currentOrigin
+    g_farTime[n] = 0;
+}
+
 void HostCatchUp(float dt)
 {
     const float* host = (const float*)(PlayerState(0) + 0x14);
     bool hostLinked = *(uint8_t**)(g::Entity(0) + g::GE_LINK);
     const float* last = g_trailCount ? g_trail[(g_trailNext - 1 + TRAIL) % TRAIL] : nullptr;
+    // el host aparecio lejos de su rastro (cargo una partida, se bajo de un vehiculo): el rastro viejo mandaba a los
+    // remotos a donde estaba antes (tras cargar partida, al inicio de la mision)
+    if (last && Dist2(last, host) > CATCHUP_DIST * CATCHUP_DIST) {
+        g_trailCount = 0;
+        last = nullptr;
+    }
     if (!hostLinked && *(int*)(PlayerState(0) + g::PS_GROUNDENT) != 0x7ff && (!last || Dist2(last, host) > 32 * 32)) {
         memcpy(g_trail[g_trailNext], host, 12);
         g_trailNext = (g_trailNext + 1) % TRAIL;
@@ -1557,12 +1608,28 @@ void HostCatchUp(float dt)
         if (!spot) continue;  // el host no se movio todavia: se reintenta en el proximo frame
         Log("jugador %d: lejos del host %.0f s, aparece en su rastro (%.0f %.0f %.0f)", n, g_farTime[n], spot[0],
             spot[1], spot[2]);
-        memcpy(o, spot, 12);
-        memset(PlayerState(n) + 0x20, 0, 12);  // velocidad
-        memcpy(g::Entity(n) + g::GE_ORIGIN, spot, 12);  // r.currentOrigin
-        g_farTime[n] = 0;
+        MoveRemote(n, spot);
         SendBanner(n, "^3You fell behind: moved next to the host", false);
     }
+}
+
+// Recien entrado sin jugador guardado que retomar (ClientBegin lo pone en el inicio del mapa): mas adelante en la
+// mision esa zona es prohibida y los scripts del nivel le disparan al "player", que para ellos es el host. Lejos del
+// host se lo pone en el lugar del host antes del primer frame (los jugadores no chocan entre si), y 3 s sin daño para
+// todos por lo que ya disparo ClientBegin.
+DWORD g_joinedAt;
+bool InJoinGrace() { return g_joinedAt && GetTickCount() - g_joinedAt < 3000; }
+
+void PlaceJoined(int n)
+{
+    g_joinedAt = GetTickCount();
+    if (!g_joinedAt) g_joinedAt = 1;
+    const float* host = (const float*)(PlayerState(0) + 0x14);
+    if (Dist2((const float*)(PlayerState(n) + 0x14), host) <= CATCHUP_DIST * CATCHUP_DIST) return;
+    float spot[3];
+    memcpy(spot, host, 12);
+    Log("jugador %d: entra en el lugar del host (%.0f %.0f %.0f), no en el inicio del mapa", n, spot[0], spot[1], spot[2]);
+    MoveRemote(n, spot);
 }
 
 uint8_t* g_linkFailed[g::MAX_CLIENTS];
@@ -1670,6 +1737,159 @@ _Hook_CLGetUserCmd:
 )");
 extern "C" void Hook_GetUsercmd();
 extern "C" void Hook_CLGetUserCmd();
+
+// El juego local del que se une no corre (servidor congelado: Hook_SvFrame), pero el cgame le hace usar el tiempo
+// libre de CPU por su cuenta (trap 254 -> CoD1 0x44d200, UO 0x44f510 -> vmMain 10 y 11): seguian vivos los scripts
+// y vehiculos del mapa local. Tras cargar partida el camion del inicio buscaba sus ruedas en el modelo de otra entidad
+// del host y el juego lo echaba ("Script vehicle [convoy_truck_1] needs [tag_wheel_front_left]"). Esas dos llamadas
+// no llegan al juego (VM_Call devuelve 0); el resto de la funcion (tiempos) sigue. VM_Call: CoD1 0x44f270, UO
+// 0x451570, vm en eax.
+//
+// Ademas, M_ENTS escribe el estado de las entidades del host sobre las del mapa local, tipo incluido: una entidad local
+// quedaba marcada como actor sin serlo y al cerrar el mapa local (G_ShutdownGame, vmMain 1: recarga, desconexion o
+// error) el juego buscaba el arbol de ese actor inexistente (-1) y se caia en CoDUOSP.exe+8265b. Los estados locales
+// se guardan al conectarse (JoinerHijack) y se reponen antes de cerrar.
+extern "C" void* g_vmCallTramp;
+void* g_vmCallTramp;
+uint8_t g_localStates[g::MAX_GENTITIES][g::ENTSTATE_MAX];
+bool g_localStatesSaved;
+
+void SaveLocalStates()
+{
+    for (int e = 0; e < g::MAX_GENTITIES; ++e) memcpy(g_localStates[e], g::Entity(e), g::ENTSTATE_SIZE);
+    g_localStatesSaved = true;
+}
+
+extern "C" int __cdecl FrozenVmCall(const uint32_t* sp, uint8_t* vm)
+{
+    int cmd = (int)sp[1];
+    if (cmd == 1 && vm == g::gvm && g_localStatesSaved && g::sv_gentities) {
+        for (int e = 0; e < g::MAX_GENTITIES; ++e) memcpy(g::Entity(e), g_localStates[e], g::ENTSTATE_SIZE);
+        g_localStatesSaved = false;
+        Log("joiner: estados del mapa local repuestos antes de cerrarlo");
+        return 0;
+    }
+    if (!S || !S->frozen || vm != g::gvm || (cmd != 10 && cmd != 11)) return 0;
+    static bool logged;
+    if (!logged) Log("joiner: el juego local no corre en el tiempo libre (vmMain %d)", cmd);
+    logged = true;
+    return 1;
+}
+asm(R"(
+.intel_syntax noprefix
+.globl _Hook_VmCall
+_Hook_VmCall:
+    pushad
+    push eax
+    lea ecx, [esp+36]
+    push ecx
+    call _FrozenVmCall
+    add esp, 8
+    test eax, eax
+    popad
+    jnz 1f
+    jmp dword ptr [_g_vmCallTramp]
+1:  xor eax, eax
+    ret
+.att_syntax
+)");
+extern "C" void Hook_VmCall();
+
+// Cargar partida (Load Game del menu = loadgame, y loadgame_continue) no pasa por SV_SpawnServer: el remoto no se
+// enteraba y se quedaba donde estaba. Antes de cargar se le dice que mapa cargar. Los comandos y no la funcion que
+// los dos llaman (CoD1 0x448520, UO 0x44a700): esa tambien corre cuando entra un jugador y lo mandaba a recargar.
+extern "C" void* g_loadTramp[2];
+void* g_loadTramp[2];
+extern "C" void __cdecl HostBeforeLoad();
+asm(R"(
+.intel_syntax noprefix
+.globl _Hook_LoadGame
+_Hook_LoadGame:
+    pushad
+    call _HostBeforeLoad
+    popad
+    jmp dword ptr [_g_loadTramp]
+.globl _Hook_LoadContinue
+_Hook_LoadContinue:
+    pushad
+    call _HostBeforeLoad
+    popad
+    jmp dword ptr [_g_loadTramp+4]
+.att_syntax
+)");
+extern "C" void Hook_LoadGame();
+extern "C" void Hook_LoadContinue();
+
+// Aviso al actor dueño de un punto de ruta (ver NODE_OWNER_RVA): con ebx = 0 (el dueño es un jugador) no se hace nada
+extern "C" void* g_nodeOwnerTramp;
+void* g_nodeOwnerTramp;
+asm(R"(
+.intel_syntax noprefix
+.globl _Hook_NodeOwner
+_Hook_NodeOwner:
+    test ebx, ebx
+    jz 1f
+    jmp dword ptr [_g_nodeOwnerTramp]
+1:  ret
+.att_syntax
+)");
+extern "C" void Hook_NodeOwner();
+
+// G_Trigger (UO RVA 0x47450 / CoD1 0x43810; edi = disparador, esi = quien lo activa): los scripts del nivel esperan
+// "trigger" y actuan sobre level.player, que es el host. Con el remoto pisando la zona de muerte del frente de
+// bastogne1 (line_zone_field_think) al host le caian los morteros donde estuviera, y los disparadores de avance se
+// cumplian sin el host. Como en el SP, los activa solo el host.
+extern "C" void* g_triggerTramp;
+void* g_triggerTramp;
+extern "C" int __cdecl RemoteActivator(uint8_t* ent);
+asm(R"(
+.intel_syntax noprefix
+.globl _Hook_Trigger
+_Hook_Trigger:
+    push eax
+    push ecx
+    push edx
+    push esi
+    call _RemoteActivator
+    add esp, 4
+    test eax, eax
+    pop edx
+    pop ecx
+    pop eax
+    jnz 1f
+    jmp dword ptr [_g_triggerTramp]
+1:  ret
+.att_syntax
+)");
+extern "C" void Hook_Trigger();
+
+// Paso de disparadores de cada jugador en ClientThink (UO RVA 0x136d0 / CoD1 0x11c10; edi = jugador, ecx = origen):
+// avisa "touch" y llama al manejador de cada disparador que pisa. Bloquear solo G_Trigger no alcanzo: al host le
+// seguian cayendo los morteros de bastogne1 con el remoto en la zona. Para el remoto el paso no corre (solo recorre
+// disparadores: armas, botiquines y "usar" van por otro lado).
+extern "C" void* g_touchPassFn;
+void* g_touchPassFn;
+extern "C" int __cdecl RemotePlayer(uint8_t* ent);
+asm(R"(
+.intel_syntax noprefix
+.globl _Hook_TouchPass
+_Hook_TouchPass:
+    push eax
+    push ecx
+    push edx
+    push edi
+    call _RemotePlayer
+    add esp, 4
+    test eax, eax
+    pop edx
+    pop ecx
+    pop eax
+    jnz 1f
+    jmp dword ptr [_g_touchPassFn]
+1:  ret
+.att_syntax
+)");
+extern "C" void Hook_TouchPass();
 extern "C" void* g_clGetUserCmdTramp;
 void* g_clGetUserCmdTramp;
 namespace {
@@ -1693,6 +1913,12 @@ void HookExe(bool on, uintptr_t addr, const uint8_t* prologue, int len, void* de
     if (!on && hooked && tramp) hook::Write(addr, prologue, len);
 }
 
+const uint8_t kVmCallPrologue[8] = {0x8B, 0x4C, 0x24, 0x34, 0x8B, 0x54, 0x24, 0x30};
+void HookVmCall(bool on)
+{
+    HookExe(on, g::A(0x44f270, 0x451570), kVmCallPrologue, 8, (void*)Hook_VmCall, g_vmCallTramp, "VM_Call");
+}
+
 void HookUsercmd(bool on)
 {
     if (S->role == HOST || !on)
@@ -1704,8 +1930,18 @@ void HookUsercmd(bool on)
 
 // Checkpoint con remotos: el juego guarda a todos los jugadores conectados y al cargar (solo con el host) cortaba
 // con "G_LoadGame: client mis-match in savegame". Se carga igual (el `jne` que saltea el error pasa a `jmp`): los
-// remotos guardados quedan en el juego sin cliente del motor, y HostDropGhosts los desconecta. No guardarlos rompia
-// otras entidades que los nombran (el camion con el remoto enganchado: cierre al cargar en UO).
+// remotos guardados quedan en el juego sin cliente del motor y el que vuelve a entrar los retoma (HostJoin). No
+// guardarlos rompia otras entidades que los nombran (el camion con el remoto enganchado: cierre al cargar en UO).
+// Puntos de ruta de la IA: cuando un jugador pasa a otro punto, el juego avisa al actor dueño de ese punto y de los
+// vecinos (UO RVA 0x524d0 / CoD1 0x4dd50, con ebx = actor del dueño: ent+0x10c / +0x108). En el SP el unico jugador
+// se saltea a si mismo; en coop el dueño puede ser el otro jugador, que tiene sentient pero no actor, y el juego leia
+// el actor vacio (cierre en uo_gamex86.dll+524d0). Sin actor no hay a quien avisar.
+const uint32_t NODE_OWNER_RVA = g::uo ? 0x524d0 : 0x4dd50;
+const uint8_t kNodeOwnerPrologue[6] = {0x8B, 0x43, 0x04, 0x8B, 0x48, uint8_t(g::uo ? 0x44 : 0x40)};
+const uint32_t G_TRIGGER_RVA = g::uo ? 0x47450 : 0x43810;
+uint8_t g_triggerSaved[8];  // prologo de G_Trigger tal como quedo reubicado en esta carga del modulo
+const uint32_t TOUCH_CALL_RVA = g::uo ? 0x14330 : 0x1285c, TOUCH_PASS_RVA = g::uo ? 0x136d0 : 0x11c10;
+
 void HookLoad(uint8_t* game, bool on)
 {
     uint8_t* jne = game + (g::uo ? 0x30b74 : 0x2de6f);  // jne +0x0d (cliente conectado) antes de "push msg; call"
@@ -1732,6 +1968,24 @@ void HookDamage(bool on)
             }
         }
         HookLoad(game, true);
+        uint8_t* owner = game + NODE_OWNER_RVA;
+        if (!memcmp(owner, kNodeOwnerPrologue, 6)) {
+            g_nodeOwnerTramp = hook::Inline((uintptr_t)owner, (void*)Hook_NodeOwner, 6);
+            Log("puntos de ruta: sin aviso a dueños que no son actores (otro jugador)");
+        }
+        // "push 1; call [trap]" (el trap es absoluto y se reubica con la DLL) y "add esp, 4; test eax, eax"
+        uint8_t* trig = game + G_TRIGGER_RVA;
+        if (!memcmp(trig, "\x6A\x01\xFF\x15", 4) && !memcmp(trig + 8, "\x83\xC4\x04\x85\xC0", 5)) {
+            memcpy(g_triggerSaved, trig, 8);
+            g_triggerTramp = hook::Inline((uintptr_t)trig, (void*)Hook_Trigger, 8);
+            Log("disparadores del nivel: los activa solo el host");
+        }
+        uint8_t* call = game + TOUCH_CALL_RVA;
+        if (call[0] == 0xE8 && call + 5 + *(int32_t*)(call + 1) == game + TOUCH_PASS_RVA) {
+            g_touchPassFn = game + TOUCH_PASS_RVA;
+            hook::PatchRel32((uintptr_t)call, (void*)Hook_TouchPass);
+            Log("disparadores del nivel: el remoto no los pisa");
+        }
         uint8_t* fn = game + G_DAMAGE_RVA;
         if (memcmp(fn, kGDamagePrologue, sizeof kGDamagePrologue) != 0) {
             Log("G_Damage: prologo inesperado, sin opcion de dano entre jugadores");
@@ -1747,7 +2001,50 @@ void HookDamage(bool on)
         hook::Write((uintptr_t)(game + G_DAMAGE_RVA), kGDamagePrologue, sizeof kGDamagePrologue);
         g_damageHooked = nullptr;
     }
-    if (!on && game) HookLoad(game, false);
+    if (!on && game) {
+        HookLoad(game, false);
+        if (game[NODE_OWNER_RVA] == 0xE9) hook::Write((uintptr_t)(game + NODE_OWNER_RVA), kNodeOwnerPrologue, 6);
+        if (game[G_TRIGGER_RVA] == 0xE9 && g_triggerSaved[0]) hook::Write((uintptr_t)(game + G_TRIGGER_RVA), g_triggerSaved, 8);
+        uint8_t* call = game + TOUCH_CALL_RVA;
+        if (call[0] == 0xE8 && call + 5 + *(int32_t*)(call + 1) == (uint8_t*)Hook_TouchPass)
+            hook::PatchRel32((uintptr_t)call, game + TOUCH_PASS_RVA);
+    }
+}
+
+// Cargar partida desde el menu (tambien tras volver al menu por un error): el juego vuelve a cargar el modulo de
+// juego y G_LoadGame corre antes del primer frame del host, donde HookDamage ponia HookLoad ("G_LoadGame: client
+// mis-match in savegame"). Windows avisa apenas mapea la DLL, antes de que corra: ahi se aplica. Al descargarla se
+// olvida el enganche, para volver a ponerlo aunque la nueva quede en la misma direccion.
+struct LdrName { USHORT Length, MaximumLength; const wchar_t* Buffer; };
+struct LdrDll { ULONG Flags; const LdrName* FullDllName; const LdrName* BaseDllName; uint8_t* DllBase; ULONG Size; };
+void* g_dllCookie;
+int g_gameDllLoads;  // cuantas veces se cargo el modulo de juego (el que se une espera una nueva tras pedir devmap)
+
+void CALLBACK OnDllNotification(ULONG reason, const LdrDll* dll, void*)
+{
+    const wchar_t* want = g::uo ? L"uo_gamex86.dll" : L"gamex86.dll";
+    const LdrName* name = dll->BaseDllName;
+    if (!name || name->Length != wcslen(want) * 2 || _wcsnicmp(name->Buffer, want, name->Length / 2)) return;
+    Log("modulo de juego %s en %p", reason == 1 ? "cargado" : "descargado", dll->DllBase);
+    if (reason == 1) ++g_gameDllLoads;
+    if (reason == 1 && S && S->role == HOST) HookLoad(dll->DllBase, true);
+    if (reason != 1 && dll->DllBase == g_damageHooked) g_damageHooked = nullptr;
+}
+
+void WatchGameDll(bool on)
+{
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    if (on && !g_dllCookie) {
+        auto reg = (LONG(NTAPI*)(ULONG, void*, void*, void**))GetProcAddress(ntdll, "LdrRegisterDllNotification");
+        if (!reg || reg(0, (void*)OnDllNotification, nullptr, &g_dllCookie) != 0) {
+            g_dllCookie = nullptr;
+            Log("sin aviso de carga del modulo de juego: cargar partida con remotos guardados puede fallar");
+        }
+    } else if (!on && g_dllCookie) {
+        auto unreg = (LONG(NTAPI*)(void*))GetProcAddress(ntdll, "LdrUnregisterDllNotification");
+        if (unreg) unreg(g_dllCookie);
+        g_dllCookie = nullptr;
+    }
 }
 
 // Jugadores que se traspasan: en training (y otros mapas) todos aparecen en el mismo lugar y encimados nadie se
@@ -1962,10 +2259,73 @@ void HookSpawnServer(bool on)
     if (call[0] == 0xE8 && SPAWN_SERVER_CALL + 5 + *(int32_t*)(call + 1) != want) hook::PatchRel32(SPAWN_SERVER_CALL, (void*)want);
 }
 
+const uint8_t kLoadGameCoD1[5] = {0xA1, 0x40, 0xE9, 0x52, 0x01}, kLoadGameUO[5] = {0xA1, 0xA0, 0x1C, 0x80, 0x04},
+              kContinueCoD1[6] = {0x53, 0x68, 0x00, 0xED, 0x54, 0x00},
+              kContinueUO[8] = {0x53, 0x6A, 0x01, 0x68, 0x70, 0x1E, 0x54, 0x00};
+void HookLoadGame(bool on)
+{
+    HookExe(on, g::A(0x448790, 0x44a970), g::uo ? kLoadGameUO : kLoadGameCoD1, 5, (void*)Hook_LoadGame, g_loadTramp[0],
+            "loadgame");
+    HookExe(on, g::A(0x448ac0, 0x44aca0), g::uo ? kContinueUO : kContinueCoD1, g::uo ? 8 : 6, (void*)Hook_LoadContinue,
+            g_loadTramp[1], "loadgame_continue");
+}
+}  // namespace
+
+// 1 = entidad de un jugador que no es el host (solo en el host; ver Hook_TouchPass)
+extern "C" int __cdecl RemotePlayer(uint8_t* ent)
+{
+    if (!S || S->role != HOST || !ent || !g::sv_gentities || !g::sv_gentitySize) return 0;
+    int n = (int)(ent - g::sv_gentities) / g::sv_gentitySize;
+    return n >= 1 && n < g::MAX_CLIENTS && *(void**)(ent + g::GE_CLIENT);
+}
+
+// G_Trigger: 1 = lo activa un jugador que no es el host (ver Hook_Trigger)
+extern "C" int __cdecl RemoteActivator(uint8_t* ent)
+{
+    if (!RemotePlayer(ent)) return 0;
+    int n = (int)(ent - g::sv_gentities) / g::sv_gentitySize;
+    static DWORD lastLog;
+    if (GetTickCount() - lastLog > 10000) {
+        lastLog = GetTickCount();
+        Log("disparador del nivel pisado por el jugador %d: no cuenta (solo el host)", n);
+    }
+    return 1;
+}
+
+extern "C" void __cdecl HostBeforeLoad()
+{
+    if (S && S->role == HOST && CoopActive()) {
+        Log("host: carga una partida, los remotos la cargan y vuelven");
+        HostDropRemotes(g::CvarString("mapname"), true);
+    }
+}
+
+namespace {
+
 // ---------- joiner ----------
+
+// Cargar el mapa del host y volver a entrar. "devmap" no carga en el acto: cooprejoin corria antes y pedia lugar con
+// el mapa viejo; el host lo aceptaba (mismo nombre de mapa), y despues la recarga dejaba esa conexion colgada
+// (lugar equivocado, "a reliable command was cycled out"). M_JOIN sale recien con el servidor local nuevo.
+bool g_waitingReload;  // se pidio el devmap y el modulo de juego local todavia no se volvio a cargar
+int g_loadsAtReload;
+
+void ReloadLocalMap(const char* map)
+{
+    g_waitingReload = true;
+    g_loadsAtReload = g_gameDllLoads;
+    char cmd[128];
+    snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", map);
+    g::Cbuf_AddText(cmd);
+}
 
 void JoinerSendJoin()
 {
+    S->lastJoinTry = GetTickCount();  // el reintento (cada 1 s) cuenta desde aca, se mande o no
+    if (g_waitingReload) {
+        if (g::sv_state != 2 || g_gameDllLoads == g_loadsAtReload) return;  // todavia carga el mapa local
+        g_waitingReload = false;
+    }
     Writer w(M_JOIN);
     w.Put<int>(*(int*)(g::clc_netchan + g::NC_QPORT));
     w.Put<int>(*(int*)(g::clc_netchan + g::NC_IN));
@@ -1987,13 +2347,13 @@ void JoinerHijack()
         Log("joiner: mapa local '%s' (servidor %d), cargo %s y vuelvo a entrar", g::CvarString("mapname"), g::sv_state,
             S->hostMap);
         S->role = NONE;
-        char cmd[128];
-        snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", S->hostMap);
-        g::Cbuf_AddText(cmd);
+        ReloadLocalMap(S->hostMap);
         return;
     }
     FreeOldTrees();
+    SaveLocalStates();                             // antes de que M_ENTS los pise (se reponen al cerrar el mapa local)
     S->frozen = true;                              // el servidor local queda solo para colision y assets
+    HookVmCall(true);
     *(int*)(g::Client(0) + g::CL_STATE) = 0;      // que no acumule comandos que nadie confirma
     for (int i = 0; i < g::MAX_CONFIGSTRINGS; ++i)
         if (strcmp(g::ConfigString(i), S->cs[i]) != 0) g::SV_SetConfigstring(i, S->cs[i]);
@@ -2042,9 +2402,7 @@ void JoinerControl(uint8_t type, Reader r)
         Log("joiner: el host esta en %s, lo cargo y vuelvo a entrar", map);
         g::Com_Printf("^3COOP: the host is on %s, loading...\n", map);
         CoopStatus("Host found: loading %s...", map);
-        char cmd[128];
-        snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", map);
-        g::Cbuf_AddText(cmd);
+        ReloadLocalMap(map);
         break;
     }
     case M_CS:
@@ -2094,9 +2452,7 @@ void JoinerControl(uint8_t type, Reader r)
         Log("joiner: el host carga %s (%s), lo cargo y vuelvo a entrar", S->hostMap, newMap ? "nivel nuevo" : "checkpoint");
         if (newMap) g::Com_Printf("^3COOP: the host moved on to %s, loading...\n", S->hostMap);
         else g::Com_Printf("^3COOP: the host went back to the last checkpoint, reconnecting...\n");
-        char cmd[128];
-        snprintf(cmd, sizeof cmd, "devmap %s\ncooprejoin\n", S->hostMap);
-        g::Cbuf_AddText(cmd);
+        ReloadLocalMap(S->hostMap);
         break;
     }
     case M_DOWNED: {
@@ -2297,6 +2653,7 @@ void Cmd_CoopJoin()
     S->role = JOINER;
     S->joined = false;
     S->hostMap[0] = 0;
+    g_waitingReload = false;  // desde el menu: sin mapa local, el host contesta M_MAP
     memset(S->cs, 0, sizeof S->cs);  // el gamestate se junta de los M_CS de este intento
     JoinerSendJoin();
     if (steam::IsAddr(S->host)) {
@@ -2623,15 +2980,19 @@ EXPORT void Coop_Init(const CoreApi* api, void* state, int fresh)
         S->sock = INVALID_SOCKET;
         S->role = NONE;
     }
+    WatchGameDll(true);
     Log("nucleo listo (rol %d, %s)", S->role, fresh ? "estado nuevo" : "estado conservado");
     if (!steam::SelfTest()) Log("steam: FALLA la autoprueba de direcciones falsas / nombres");
 }
 
 EXPORT void Coop_Shutdown()
 {
+    WatchGameDll(false);  // el aviso apunta a esta DLL, que se va a descargar
+    HookVmCall(false);
     HookCgame(false);  // el puntero apunta a esta DLL, que se va a descargar
     HookDamage(false);
     HookSpawnServer(false);
+    HookLoadGame(false);
     HookUsercmd(false);
     HookPlayerTrace(false);
     SkipUiPauseCheck(false);
@@ -2724,6 +3085,7 @@ EXPORT void __cdecl Coop_HostFrame()
     HookCgame(true);
     HookDamage(true);
     HookSpawnServer(true);
+    HookLoadGame(true);
     HookUsercmd(true);
     HookPlayerTrace(true);
     PlayersNotSolidForPrediction();
@@ -2782,6 +3144,7 @@ EXPORT int __cdecl Coop_FrozenFrame(int msec)
     if (!S->frozen) return 0;
     HookCgame(true);
     HookUsercmd(true);
+    HookVmCall(true);
     JoinerSkipPregame();
     JoinerKeepAlive();
     if (!S->frozen) return 0;  // se perdio el host

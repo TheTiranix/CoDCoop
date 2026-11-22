@@ -28,6 +28,19 @@ inline bool CodeAddress(uint32_t v, char* out, size_t size, bool anyCode = false
     return true;
 }
 
+// hasta 16 direcciones de retorno posibles desde sp, como " modulo+desp" cada una
+inline void Stack(const uint32_t* sp, char* line, size_t size)
+{
+    char one[96];
+    int len = 0, found = 0;
+    line[0] = 0;
+    for (int i = 0; i < 4096 && found < 16 && len < (int)size - 100 && !IsBadReadPtr(sp + i, 4); ++i)
+        if (CodeAddress(sp[i], one, sizeof one)) {
+            len += snprintf(line + len, size - len, " %s", one);
+            ++found;
+        }
+}
+
 // dos lineas al registro: el cierre con los registros y hasta 16 direcciones de retorno posibles
 template <class LogFn> void Write(EXCEPTION_POINTERS* ep, LogFn log)
 {
@@ -37,14 +50,8 @@ template <class LogFn> void Write(EXCEPTION_POINTERS* ep, LogFn log)
     CodeAddress(at, where, sizeof where, true);
     log("CRASH %08lx en %08x %s (eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx)",
         ep->ExceptionRecord->ExceptionCode, at, where, c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi);
-    char line[1024] = "", one[96];
-    int len = 0, found = 0;
-    const uint32_t* sp = (const uint32_t*)c->Esp;
-    for (int i = 0; i < 4096 && found < 16 && len < (int)sizeof line - 100 && !IsBadReadPtr(sp + i, 4); ++i)
-        if (CodeAddress(sp[i], one, sizeof one)) {
-            len += snprintf(line + len, sizeof line - len, " %s", one);
-            ++found;
-        }
+    char line[1024];
+    Stack((const uint32_t*)c->Esp, line, sizeof line);
     log("  pila:%s", line);
 }
 
