@@ -50,6 +50,14 @@ Over the internet by IP
 - If you cannot open the port: use a virtual network program (for example Radmin VPN
   or ZeroTier) and the IP that program gives the host.
 
+Reporting a problem
+- The mod writes a log in the game folder: codcoop.log (Call of Duty 1 and United
+  Offensive) or cod2coop.log (Call of Duty 2). Send it with your report.
+- If the game crashed and you opened it again, also send codcoop_previous.log (or
+  cod2coop_previous.log): it is the log of the session before.
+- If the game is in Program Files and the log is not there, look in
+  %LOCALAPPDATA%\VirtualStore\Program Files (x86)\ followed by the game's folder.
+
 Uninstall
 - Delete from the game folder: ddraw.dll, codcoop_core.dll, steam_api.dll,
   main\pakz_coop.pk3, uo\pakz_coop.pk3 and the codcoop_tmp folder. If there are .bak files

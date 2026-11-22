@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include "api.h"
+#include "crashlog.h"
 #include "game.h"
 #include "hook.h"
 
@@ -31,6 +32,20 @@ static void Log(const char* fmt, ...)
     vsnprintf(b, sizeof b, fmt, a);
     va_end(a);
     LogLine(b);
+}
+
+#ifndef COOP_VERSION
+#define COOP_VERSION "dev"  // build.bat pone la de git describe
+#endif
+
+// El registro de la vez anterior queda como *_previous.log: si el juego se cerro y lo vuelven a abrir, el jugador
+// todavia lo puede mandar. Otro juego abierto desde la misma carpeta lo tiene abierto: no se mueve y no se abre.
+static FILE* OpenLog(const char* p)
+{
+    char prev[MAX_PATH];
+    snprintf(prev, sizeof prev, "%.*s_previous.log", (int)(strrchr(p, '.') - p), p);
+    MoveFileExA(p, prev, MOVEFILE_REPLACE_EXISTING);
+    return _fsopen(p, "w", _SH_DENYWR);
 }
 
 static FARPROC Real(const char* name)
@@ -283,8 +298,23 @@ static void __cdecl Hook_SendClientMessages()
     if (g_core.hostFrame) g_core.hostFrame();
 }
 
-static void __cdecl Hook_SvFrame(int msec)
+// El cartel "Error:" del juego (com_errorMessage) tambien al registro, para que el jugador lo pueda mandar
+static void LogGameError()
 {
+    static DWORD last;
+    static char seen[256];
+    if (GetTickCount() - last < 500) return;
+    last = GetTickCount();
+    const char* e = g::CvarString("com_errorMessage");
+    if (!*e) seen[0] = 0;
+    if (!*e || !strncmp(e, seen, sizeof seen - 1)) return;
+    snprintf(seen, sizeof seen, "%s", e);
+    Log("error del juego: %s", e);
+}
+
+static void __cdecl Hook_SvFrame(int msec)  // en cada frame, tambien en el menu
+{
+    LogGameError();
     if (!g_core.frozenFrame || !g_core.frozenFrame(msec)) g_origSvFrame(msec);
 }
 
@@ -306,27 +336,12 @@ static void InstallHooks()
         (void*)g_origSendClientMessages, (void*)g_origSvFrame);
 }
 
-// Crash sin manejar: direccion y posibles direcciones de retorno de la pila (codigo del exe o de las DLL).
+// Crash sin manejar: direccion y posibles direcciones de retorno de la pila como modulo+desplazamiento
+// (src/crashlog.h). Antes solo se miraban el exe y los modulos arriba de 0x10000000, y el modulo de juego de UO a
+// veces carga mas abajo: el cierre de bastogne1 quedo sin la llamada que lo causo.
 static LONG WINAPI CrashLog(EXCEPTION_POINTERS* ep)
 {
-    CONTEXT* c = ep->ContextRecord;
-    Log("CRASH %08lx en %08lx (eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx)",
-        ep->ExceptionRecord->ExceptionCode, (unsigned long)(uintptr_t)ep->ExceptionRecord->ExceptionAddress, c->Eax,
-        c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi);
-    char line[512] = "";
-    int len = 0, found = 0;
-    const uint32_t* sp = (const uint32_t*)c->Esp;
-    for (int i = 0; i < 2048 && found < 16 && !IsBadReadPtr(sp + i, 4); ++i) {
-        uint32_t v = sp[i];
-        HMODULE m;
-        if ((v >= 0x401000 && v < g::A(0x533000, 0x53f000)) ||
-            (v > 0x10000000 && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                                  (LPCSTR)(uintptr_t)v, &m) && m != GetModuleHandleA("kernel32.dll"))) {
-            len += snprintf(line + len, sizeof line - len, " %08x", v);
-            ++found;
-        }
-    }
-    Log("  pila:%s (nucleo en %p)", line, (void*)g_core.module);
+    crashlog::Write(ep, [](const char* fmt, auto... args) { Log(fmt, args...); });
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -338,12 +353,15 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID)
         char p[MAX_PATH];
         // una instancia que se une escribe aparte (pruebas con 2 juegos en la misma carpeta)
         snprintf(p, sizeof p, "%s%s", g_dir, strstr(GetCommandLineA(), "+coopjoin") ? "codcoop_join.log" : "codcoop.log");
-        g_log = _fsopen(p, "w", _SH_DENYWR);  // otro juego abierto desde la misma carpeta ya lo tiene: *_2.log
+        g_log = OpenLog(p);  // otro juego abierto desde la misma carpeta ya lo tiene: *_2.log
         if (!g_log) {
             strcpy(strrchr(p, '.'), "_2.log");
-            g_log = _fsopen(p, "w", _SH_DENYWR);
+            g_log = OpenLog(p);
         }
-        Log("codcoop cargado en %s, exe base %p", GetCommandLineA(), GetModuleHandleA(nullptr));
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        Log("CoD Coop %s (%04d-%02d-%02d) cargado en %s, exe base %p", COOP_VERSION, t.wYear, t.wMonth, t.wDay,
+            GetCommandLineA(), GetModuleHandleA(nullptr));
         char exe[MAX_PATH];
         GetModuleFileNameA(nullptr, exe, MAX_PATH);
         if (!_stricmp(strrchr(exe, '\\') + 1, "CoD2SP_s.exe")) {  // CoD2: modulo aparte (src/cod2.cpp), en prueba

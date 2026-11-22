@@ -4,7 +4,10 @@ rem los juegos abiertos lo recargan solos al ver el archivo nuevo.
 cd /d "%~dp0"
 set PATH=D:\Tools\mingw32\mingw32\bin;%PATH%
 if not exist build mkdir build
-set OPT=-std=c++17 -O2 -shared -static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp
+rem version en los registros de los jugadores (codcoop.log, cod2coop.log): el tag de git; crear el tag antes de armar una release
+set VER=dev
+for /f %%v in ('git describe --tags --always --dirty 2^>nul') do set VER=%%v
+set OPT=-std=c++17 -O2 -shared -static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp -DCOOP_VERSION=\"%VER%\"
 g++ %OPT% -o build\ddraw.dll src\loader.cpp src\ddraw.def
 if errorlevel 1 exit /b 1
 g++ %OPT% -o build\codcoop_core.dll src\core.cpp -lws2_32

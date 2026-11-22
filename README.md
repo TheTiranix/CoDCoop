@@ -82,6 +82,16 @@ The Call of Duty 2 campaign works the same way: the host runs the mission and up
 - Console: `coop2host`, `coop2join <ip>`, `coop2join steam:<SteamID>`, `coop2leave`, `set coop2_friendlyfire 1`.
 - Uninstall: delete `ddraw.dll`, `cod2coop.dll`, `steam_api.dll` and `main\zz_coop2.iwd` from the Call of Duty 2 folder (and remove `.bak` from `ddraw.dll.bak` or `steam_api.dll.bak` if there are any).
 
+## Reporting a problem
+
+The mod writes a log in the game folder (the one with `CoDSP.exe` or `CoD2SP_s.exe`). Send it with your report:
+
+- Call of Duty 1 and United Offensive: `codcoop.log`.
+- Call of Duty 2: `cod2coop.log`.
+- If the game crashed and you opened it again, also send `codcoop_previous.log` (or `cod2coop_previous.log`): it is the log of the session before.
+
+The log has the mod version, what each player did, errors shown by the game and crashes. If the game is installed in `Program Files` and you cannot find the log there, look in `%LOCALAPPDATA%\VirtualStore\Program Files (x86)\` followed by the game's folder.
+
 ## Uninstall
 
 Delete `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pakz_coop.pk3`, `uo\pakz_coop.pk3` and the `codcoop_tmp` folder from the game folder. If there are `.bak` files (`ddraw.dll.bak`, `steam_api.dll.bak`), remove the `.bak` from their names.

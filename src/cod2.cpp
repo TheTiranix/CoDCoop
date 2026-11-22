@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cmath>
 #include <initializer_list>
+#include "crashlog.h"
 #include "hook.h"
 #include "steam.h"
 
@@ -89,6 +90,10 @@ struct Msg {  // msg_t
     uint8_t* data;
     int maxsize, cursize, readcount, bit;
 };
+
+#ifndef COOP_VERSION
+#define COOP_VERSION "dev"  // build.bat pone la de git describe
+#endif
 
 alignas(16) uint8_t g_clients[MAX_CLIENTS * GCLIENT_SIZE];
 FILE* g_log;
@@ -1975,8 +1980,35 @@ void CompassFrame()
 
 // Com_Frame (0x42ed20), en cada frame del juego: sin nivel corriendo (menu, carga) Cod2_Snapshot no se llama; el que
 // se une igual pide entrar y recibe el mapa a cargar. El host solo atiende dentro del nivel.
+// Cierre sin manejar: codigo, direccion, registros y posibles direcciones de retorno (codigo del exe o de una DLL) al
+// registro; despues sigue el manejador que hubiera. Se pone en el primer frame, despues de que el juego ponga el suyo.
+static LPTOP_LEVEL_EXCEPTION_FILTER g_prevCrashFilter;
+static LONG WINAPI CrashLog(EXCEPTION_POINTERS* ep)
+{
+    crashlog::Write(ep, [](const char* fmt, auto... args) { Log(fmt, args...); });
+    return g_prevCrashFilter ? g_prevCrashFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
+}
+
+// El cartel "Error:" del juego (com_errorMessage) tambien al registro, para que el jugador lo pueda mandar
+static void LogGameError()
+{
+    static DWORD last;
+    static char seen[256];
+    if (GetTickCount() - last < 500) return;
+    last = GetTickCount();
+    uint8_t* d = Dvar_FindVar("com_errorMessage");
+    const char* e = d && *(const char**)(d + 8) ? *(const char**)(d + 8) : "";
+    if (!*e) seen[0] = 0;
+    if (!*e || !strncmp(e, seen, sizeof seen - 1)) return;
+    snprintf(seen, sizeof seen, "%s", e);
+    Log("error del juego: %s", e);
+}
+
 extern "C" void __cdecl Cod2_ComFrame()
 {
+    static bool crashLog;
+    if (!crashLog) g_prevCrashFilter = SetUnhandledExceptionFilter(CrashLog), crashLog = true;
+    LogGameError();
     RegisterCommands();  // coop2join tambien desde el menu principal
     MenuPause();
     CompassFrame();
@@ -2394,7 +2426,14 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID)
             snprintf(name, sizeof name, j && j[5] >= '3' && j[5] <= '9' ? "cod2coop_join%c.log" : "cod2coop_join.log",
                      j ? j[5] : 0);
         strcpy(strrchr(p, '\\') + 1, name);
+        // el de la vez anterior queda como *_previous.log: si el juego se cerro, el jugador todavia lo puede mandar
+        char prev[MAX_PATH];
+        snprintf(prev, sizeof prev, "%.*s_previous.log", (int)(strrchr(p, '.') - p), p);
+        MoveFileExA(p, prev, MOVEFILE_REPLACE_EXISTING);
         g_log = fopen(p, "w");
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        Log("CoD2 Coop %s (%04d-%02d-%02d)", COOP_VERSION, t.wYear, t.wMonth, t.wDay);
         strcpy(g_cmdFile, p);
         strcpy(strrchr(g_cmdFile, '.'), ".cmd");
         Install();
