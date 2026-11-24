@@ -11,7 +11,7 @@
 
 static const wchar_t* TITLE = L"Call of Duty Coop - Setup";
 static const DWORD CODSP_SIZE = 1716224;     // CoDSP.exe 1.5: el mod usa direcciones fijas de ese exe
-static const DWORD COD2SP_SIZE = 1761280;    // CoD2SP_s.exe 1.3, idem
+static const DWORD COD2SP_SIZE = 1761280;    // CoD2SP_s.exe 1.2 (el parche 1.3 solo cambia el multijugador), idem
 
 struct File { int id; const wchar_t* dest; };
 static const File COD1_FILES[] = {
@@ -196,7 +196,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                                            L"\n\nInstall anyway?") != IDYES)
             return 0;
         if ((games & COD2) && WrongSize(dir + L"\\CoD2SP_s.exe", COD2SP_SIZE) &&
-            Msg(MB_YESNO | MB_ICONWARNING, L"Your CoD2SP_s.exe is not version 1.3, the one co-op needs: it may not work."
+            Msg(MB_YESNO | MB_ICONWARNING, L"Your CoD2SP_s.exe is not version 1.2, the one co-op needs: it may not work."
+                                           L"\n(1.2 is the latest single-player version: patch 1.3 only updates multiplayer.)"
                                            L"\n\nInstall anyway?") != IDYES)
             return 0;
         Result r = Install(dir, games, dirs);

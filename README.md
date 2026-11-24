@@ -23,7 +23,7 @@ Play the **Call of Duty 1 (2003)** campaign, the **United Offensive** expansion 
 
 - **Call of Duty 1 version 1.5** for Windows, on every PC that will play.
 - For the expansion: **United Offensive version 1.41**, installed in the same folder.
-- For Call of Duty 2: **version 1.3** (`CoD2SP_s.exe`).
+- For Call of Duty 2: **version 1.2** of `CoD2SP_s.exe`, the latest single-player version (patch 1.3 only updates multiplayer, so a game patched to 1.3 is fine).
 - The mod installed on all of those PCs.
 
 ## Install

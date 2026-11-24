@@ -1,4 +1,4 @@
-// CoD2 (CoD2SP_s.exe 1.3), en prueba. El servidor de un jugador reserva un solo cliente: esto lo amplia a 4 y
+// CoD2 (CoD2SP_s.exe 1.2, el ultimo de un jugador: el parche 1.3 es solo multijugador), en prueba. El servidor de un jugador reserva un solo cliente: esto lo amplia a 4 y
 // agrega una red UDP propia. Lo carga ddraw.dll (loader.cpp) desde la carpeta del juego.
 //   coop2host            el que tiene la partida (puerto UDP 28962)
 //   coop2join <IP>       se une a esa IP (127.0.0.1 si no hay; mismo mapa cargado)
