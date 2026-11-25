@@ -11,25 +11,27 @@
 
 namespace steam {
 
+#pragma pack(push, 1)  // como en el SDK (steamnetworkingtypes.h): sin alinear, asi que en 32 bits no salta a 8
 struct Identity {  // SteamNetworkingIdentity (136 bytes): tipo 16 = SteamID, 8 bytes, SteamID64
     int type;
     int size;
     uint64_t id;
     uint8_t rest[120];
 };
+#pragma pack(pop)
 struct CallbackMsg {  // CallbackMsg_t
     int user;
     int id;
     uint8_t* param;
     int size;
 };
-struct Message {  // SteamNetworkingMessage_t, solo el principio (la identidad va alineada a 8: offset 16)
-    void* data;
-    int size;
+struct Message {  // SteamNetworkingMessage_t, solo el principio. La identidad va en el offset 12 (medido con el Steam
+    void* data;    // real: tools/steamselftest.cpp). Leida en el 16 daba siempre 0x01100001 como SteamID: el host le
+    int size;      // contestaba a nadie (issue #8)
     uint32_t conn;
     Identity peer;
 };
-static_assert(sizeof(Identity) == 136 && offsetof(Message, peer) == 16, "estructuras de Steam");
+static_assert(sizeof(Identity) == 136 && offsetof(Message, peer) == 12, "estructuras de Steam");
 
 struct Api {
     HMODULE dll;
@@ -53,11 +55,29 @@ struct Api {
     int (*receive)(void*, int channel, Message** out, int max);
     bool (*accept)(void*, const Identity*);
     void (*release)(Message*);
+    void* (*utilsIf)();
+    uint32_t (*appId)(void*);
+    void* (*netUtilsIf)();
+    void (*debugOutput)(void*, int level, void (*fn)(int, const char*));
+    void (*initRelay)(void*);
     void *users, *friends, *msgs;
 };
 inline Api a;
 inline bool up;
 inline char error[128] = "";
+
+// Registro del modulo (CoD1 o CoD2): la app con la que arranco Steam, las sesiones aceptadas, los envios que fallan y
+// los avisos de la red de Steam (issue #8: unirse por Steam no hacia nada y el registro no decia por que).
+inline void (*log)(const char* fmt, ...);
+inline CRITICAL_SECTION netLock;
+inline char netLines[16][256];
+inline int netCount, netLogged;
+inline void NetDebug(int, const char* msg)  // desde un hilo de Steam: se guarda y Poll lo escribe
+{
+    EnterCriticalSection(&netLock);
+    if (netCount < 16) snprintf(netLines[netCount++], sizeof netLines[0], "%s", msg);
+    LeaveCriticalSection(&netLock);
+}
 
 // Steam visto sin steam_api: pid del registro (queda el viejo si Steam se cerro mal), si ese proceso vive y el usuario
 // con sesion. Cambia al abrir Steam o al iniciar sesion.
@@ -114,6 +134,11 @@ inline bool Start()
         {&a.receive, "SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel"},
         {&a.accept, "SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser"},
         {&a.release, "SteamAPI_SteamNetworkingMessage_t_Release"},
+        {&a.utilsIf, "SteamAPI_SteamUtils_v010"},
+        {&a.appId, "SteamAPI_ISteamUtils_GetAppID"},
+        {&a.netUtilsIf, "SteamAPI_SteamNetworkingUtils_SteamAPI_v004"},
+        {&a.debugOutput, "SteamAPI_ISteamNetworkingUtils_SetDebugOutputFunction"},
+        {&a.initRelay, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess"},
     };
     for (auto& f : fns)
         if (!(*(FARPROC*)f.field = GetProcAddress(a.dll, f.name))) return strcpy(error, "steam_api.dll de otra version"), false;
@@ -127,7 +152,23 @@ inline bool Start()
     a.users = a.userIf();
     a.friends = a.friendsIf();
     a.msgs = a.msgIf();
-    return up = a.users && a.friends && a.msgs;
+    if (!(up = a.users && a.friends && a.msgs)) return false;
+    static bool lock;
+    if (!lock) InitializeCriticalSection(&netLock), lock = true;
+    if (void* net = a.netUtilsIf()) {
+        a.debugOutput(net, 5, NetDebug);  // k_ESteamNetworkingSocketsDebugOutputType_Msg
+        // la red de relés de Steam lista desde ya: si no, la arma la primera conexion (el juego se traba ~1 s justo al unirse)
+        a.initRelay(net);
+    }
+    void* utils = a.utilsIf();
+    if (log) log("steam: app %u (480 = Spacewar)", utils ? a.appId(utils) : 0);
+    return true;
+}
+
+// antes de descargar el modulo (el nucleo de CoD1 se recarga): que Steam no siga llamando a NetDebug
+inline void Stop()
+{
+    if (void* net = up ? a.netUtilsIf() : nullptr) a.debugOutput(net, 0, nullptr);
 }
 
 inline uint64_t MyId() { return up ? a.steamID(a.users) : 0; }
@@ -143,17 +184,30 @@ inline void Poll(void (*onJoin)(const char* connect))
     a.runFrame(pipe);
     CallbackMsg m;
     while (a.nextCallback(pipe, &m)) {
-        if (m.id == 1251) a.accept(a.msgs, (const Identity*)m.param);
-        else if (m.id == 337 && onJoin) onJoin((const char*)m.param + 8);
+        if (m.id == 1251) {
+            bool ok = a.accept(a.msgs, (const Identity*)m.param);
+            if (log) log("steam: %I64u abre una sesion: %s", ((const Identity*)m.param)->id, ok ? "aceptada" : "NO se pudo aceptar");
+        } else if (m.id == 1252 && log) {  // SteamNetworkingMessagesSessionFailed_t: el motivo lo da NetDebug
+            log("steam: la sesion con %I64u fallo", ((const Identity*)m.param)->id);
+        } else if (m.id == 337 && onJoin) onJoin((const char*)m.param + 8);
         a.freeCallback(pipe);
     }
+    EnterCriticalSection(&netLock);
+    for (int i = 0; i < netCount; ++i)
+        if (log && netLogged < 300) log("steam red: %s", netLines[i]), ++netLogged;  // tope por si Steam habla de mas
+    netCount = 0;
+    LeaveCriticalSection(&netLock);
 }
 
 inline bool Send(uint64_t id, const void* data, int len)
 {
     if (!up || !id) return false;
     Identity to{16, 8, id, {}};
-    return a.send(a.msgs, &to, data, (uint32_t)len, 1 | 32, 0) == 1;  // sin Nagle, reabre la sesion si se corto; k_EResultOK
+    int r = a.send(a.msgs, &to, data, (uint32_t)len, 1 | 32, 0);  // sin Nagle, reabre la sesion si se corto
+    static int lastBad;
+    if (r != 1 && r != lastBad && log) log("steam: no se pudo mandar a %I64u (EResult %d)", id, r);
+    lastBad = r == 1 ? 0 : r;
+    return r == 1;  // k_EResultOK
 }
 
 // un mensaje recibido o 0; uno mas grande que buf se descarta

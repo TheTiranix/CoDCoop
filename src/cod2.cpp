@@ -2436,6 +2436,7 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID)
         Log("CoD2 Coop %s (%04d-%02d-%02d)", COOP_VERSION, t.wYear, t.wMonth, t.wDay);
         strcpy(g_cmdFile, p);
         strcpy(strrchr(g_cmdFile, '.'), ".cmd");
+        steam::log = Log;
         Install();
     }
     return TRUE;

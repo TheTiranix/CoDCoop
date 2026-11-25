@@ -3000,6 +3000,7 @@ EXPORT void Coop_Init(const CoreApi* api, void* state, int fresh)
     WatchGameDll(true);
     Log("nucleo listo (rol %d, %s)", S->role, fresh ? "estado nuevo" : "estado conservado");
     if (!steam::SelfTest()) Log("steam: FALLA la autoprueba de direcciones falsas / nombres");
+    steam::log = Log;
 }
 
 EXPORT void Coop_Shutdown()
@@ -3013,6 +3014,7 @@ EXPORT void Coop_Shutdown()
     HookUsercmd(false);
     HookPlayerTrace(false);
     SkipUiPauseCheck(false);
+    steam::Stop();
     Log("nucleo descargado");
     g_api = nullptr;
 }
