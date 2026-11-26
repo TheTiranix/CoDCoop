@@ -11,7 +11,9 @@
 
 static const wchar_t* TITLE = L"Call of Duty Coop - Setup";
 static const DWORD CODSP_SIZE = 1716224;     // CoDSP.exe 1.5: el mod usa direcciones fijas de ese exe
-static const DWORD COD2SP_SIZE = 1761280;    // CoD2SP_s.exe 1.2 (el parche 1.3 solo cambia el multijugador), idem
+// CoD2SP_s.exe: el compilado el 30/3/2006, que dice "1.2" y es el mismo con el parche 1.3 y en Steam (1.3 solo cambio
+// el multijugador). Se mira esa fecha y no el tamano: el de Steam pesa otra cosa con el mismo codigo (issue #8).
+static const char COD2SP_BUILD[] = "Thu Mar 30 2006 07:35:42PM";
 
 struct File { int id; const wchar_t* dest; };
 static const File COD1_FILES[] = {
@@ -110,6 +112,14 @@ static bool WrongSize(const std::wstring& exe, DWORD size)
     return GetFileAttributesExW(exe.c_str(), GetFileExInfoStandard, &a) && a.nFileSizeLow != size;
 }
 
+// otra compilacion de CoD2SP_s.exe (1.0, 1.01): se ve el formato de la version pero no la fecha. Si no se ve ninguno
+// de los dos (exe protegido o comprimido) no se sabe, y no se avisa
+static bool OtherCod2Build(const std::wstring& exe)
+{
+    std::string data = ReadAll(exe);
+    return data.find("%s %s build %s %s") != std::string::npos && data.find(COD2SP_BUILD) == std::string::npos;
+}
+
 enum Result { DONE, FAILED, RELAUNCHED };
 
 // copia los archivos; sin permiso en una carpeta protegida (Archivos de programa) se relanza como administrador con
@@ -195,9 +205,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             Msg(MB_YESNO | MB_ICONWARNING, L"Your CoDSP.exe is not version 1.5, the one co-op needs: it may not work."
                                            L"\n\nInstall anyway?") != IDYES)
             return 0;
-        if ((games & COD2) && WrongSize(dir + L"\\CoD2SP_s.exe", COD2SP_SIZE) &&
-            Msg(MB_YESNO | MB_ICONWARNING, L"Your CoD2SP_s.exe is not version 1.2, the one co-op needs: it may not work."
-                                           L"\n(1.2 is the latest single-player version: patch 1.3 only updates multiplayer.)"
+        if ((games & COD2) && OtherCod2Build(dir + L"\\CoD2SP_s.exe") &&
+            Msg(MB_YESNO | MB_ICONWARNING, L"Your Call of Duty 2 is not updated to patch 1.2 or 1.3, the ones co-op needs:"
+                                           L" it may not work.\n(The Steam version is already 1.3.)"
                                            L"\n\nInstall anyway?") != IDYES)
             return 0;
         Result r = Install(dir, games, dirs);

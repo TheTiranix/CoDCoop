@@ -17,8 +17,8 @@ Install
   CoD2SP_s.exe for Call of Duty 2). It detects the game and installs the matching files.
 
 Call of Duty 2 (experimental)
-- Version 1.2 of CoD2SP_s.exe, the latest single-player version (patch 1.3 only updates
-  multiplayer, so a game patched to 1.3 is fine), with co-op installed on every PC.
+- Patch 1.2 or 1.3 (the Steam version is already 1.3), with co-op installed on every PC.
+  Single player shows 1.2 even with patch 1.3, because 1.3 only changed multiplayer.
 - Main menu -> "Co-op". The host clicks "Host game" and then starts or loads a mission
   as usual. The others click "Join <name>" (Steam friends, no ports to open) or type the
   host's IP and click "Join" (UDP port 28962): their game loads the host's mission by
