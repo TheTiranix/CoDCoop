@@ -15,6 +15,7 @@
 #include "game.h"
 #include "hook.h"
 #include "steam.h"
+#include "lobby.h"
 
 static const CoreApi* g_api;
 
@@ -282,6 +283,104 @@ int FindSlot(const sockaddr_in& from)
     return -1;
 }
 
+// ---------- lobby (src/lobby.h) ----------
+// El host atiende M_JOIN tambien sin partida (en el menu): anota al que pide y le contesta con la lista (M_LOBBY).
+// Cuando el host ya tiene partida, el reintento de M_JOIN de cada uno recibe M_MAP como siempre y entra solo. La
+// lista no va en State: si se recarga el nucleo se vuelve a armar con los reintentos.
+lobby::List g_lobby;  // host: los que esperan en el menu y los que ya entraron, con su nombre
+bool g_lobbyDirty;    // host: mandar la lista ya (alguien entro o se fue)
+bool g_lobbyUi;       // la ventana Cooperativo muestra la lista (ui_coop_lobby 1)
+int g_lobbySaid;      // cantidad ya anotada en el registro
+
+// nombre propio para M_JOIN y la lista: el de Steam; sin Steam vacio ("Host" / "Player N" en pantalla)
+void MyName(char out[lobby::NAME])
+{
+    char raw[64] = "";
+    if (steam::up) steam::Latin1(steam::Name(steam::MyId()), raw, sizeof raw);
+    lobby::CleanName(raw, out);
+}
+
+// M_JOIN termina en mapa + 0 + nombre + 0 (el nombre puede faltar); r apunta al mapa
+const char* JoinName(const Reader& r)
+{
+    const uint8_t* z = r.p < r.end ? (const uint8_t*)memchr(r.p, 0, r.end - r.p) : nullptr;
+    if (!z || z + 1 >= r.end || r.end[-1]) return "";
+    return (const char*)z + 1;
+}
+
+void ShowLobby(const char (*names)[lobby::NAME], int count)
+{
+    g::Cvar_Set("ui_coop_lobby", "1");
+    for (int i = 0; i < lobby::MAX_PLAYERS; ++i) {
+        char var[32];
+        snprintf(var, sizeof var, "ui_coop_player%d", i + 1);
+        if (strcmp(g::CvarString(var), i < count ? names[i] : "")) g::Cvar_Set(var, i < count ? names[i] : "");
+    }
+    g_lobbyUi = true;
+}
+void ClearLobbyUi()
+{
+    g_lobbySaid = 0;
+    if (!g_lobbyUi) return;
+    g::Cvar_Set("ui_coop_lobby", "0");
+    for (int i = 1; i <= lobby::MAX_PLAYERS; ++i) {
+        char var[32];
+        snprintf(var, sizeof var, "ui_coop_player%d", i);
+        g::Cvar_Set(var, "");
+    }
+    g_lobbyUi = false;
+}
+
+// host sin partida: M_JOIN entra al lobby (lleno: M_FULL)
+void HostLobbyJoin(const sockaddr_in& from, const char* name)
+{
+    if (!g_lobby.Touch(from, name, GetTickCount())) {
+        Writer w(M_FULL);
+        SendTo(from, w.buf, w.len);
+        return;
+    }
+    g_lobbyDirty = true;
+}
+
+// host, cada 1 s (o ya si cambio algo): vence a los que no dan noticias (5 s sin partida; 60 s con partida, porque
+// mientras cargan el mapa no mandan nada) y manda la lista a todos
+void HostLobbyTick()
+{
+    static DWORD last;
+    DWORD now = GetTickCount();
+    if (!g_lobbyDirty && now - last < 1000) return;
+    last = now;
+    g_lobbyDirty = false;
+    for (int n = 1; n < g::MAX_CLIENTS; ++n)
+        if (S->remote[n].active) g_lobby.Touch(S->remote[n].addr, nullptr, now);
+    g_lobby.Expire(now, g::sv_state ? 60000 : 5000);  // 1 = cargando el mapa: tambien 60 s
+    char names[lobby::MAX_PLAYERS][lobby::NAME], mine[lobby::NAME];
+    MyName(mine);
+    lobby::Display(mine, 0, names[0]);
+    for (int i = 0; i < g_lobby.n; ++i) lobby::Display(g_lobby.e[i].name, i + 1, names[i + 1]);
+    int count = 1 + g_lobby.n;
+    Writer w(lobby::M_LOBBY);
+    uint8_t body[1 + lobby::MAX_PLAYERS * lobby::NAME];
+    int len = lobby::Pack(body, sizeof body, names, count);
+    if (len > 0) w.Put(body, len);
+    for (int i = 0; i < g_lobby.n && len > 0; ++i) SendTo(g_lobby.e[i].addr, w.buf, w.len);
+    ShowLobby(names, count);
+    if (count != g_lobbySaid) Log("lobby: %d jugadores", count), g_lobbySaid = count;
+}
+
+// el que se une: la lista del host
+void JoinerLobby(const Reader& r)
+{
+    char names[lobby::MAX_PLAYERS][lobby::NAME];
+    int count = lobby::Unpack(r.p, int(r.end - r.p), names);
+    if (count < 1) return;
+    ShowLobby(names, count);
+    if (count == g_lobbySaid) return;
+    g_lobbySaid = count;
+    Log("lobby: el host dice %d jugadores", count);
+    if (!S->joined) CoopStatus("In the lobby (%d players). Waiting for the host to start a mission.", count);
+}
+
 // M_CS en varios paquetes y M_CSDONE con cuantos configstrings con texto son: si al remoto le falta alguno (UDP)
 // no entra y su reintento de M_JOIN (cada 1 s) hace que se mande todo de nuevo; junta lo que llega de cada vez.
 void SendGamestate(int n)
@@ -523,7 +622,10 @@ void HostJoin(const sockaddr_in& from, Reader r)
 {
     int qport = r.Get<int>(), lastIncoming = r.Get<int>(), serverCmdSeq = r.Get<int>(), relSeq = r.Get<int>();
     if (!r.Ok()) return;
-    if (g::sv_state != 2) return;  // sin partida no hay a donde unirse
+    const char* name = JoinName(r);
+    if (g::sv_state != 2) return HostLobbyJoin(from, name);  // sin partida: queda en el lobby hasta que haya
+    if (!g_lobby.Touch(from, name, GetTickCount()))
+        Log("lobby: lista llena, %s:%d no se muestra", inet_ntoa(from.sin_addr), ntohs(from.sin_port));
     uint8_t* reloading = g::Cvar_FindVar("g_reloading");
     if (reloading && *(int*)(reloading + 0x20)) return;  // mision fallida: esperar a que cargue el checkpoint
     HostDropGhosts();
@@ -2179,6 +2281,8 @@ DWORD g_hostSeen;                  // remoto: ultimo paquete del host
 void HostDropRemote(int n)
 {
     Log("host: se libera el lugar del jugador %d (ultimo paquete hace %lu ms)", n, GetTickCount() - g_lastSeen[n]);
+    g_lobby.Remove(S->remote[n].addr);
+    g_lobbyDirty = true;
     if (S->bodyTree[n]) HostFreeBody(n);
     S->downed[n] = false;
     S->remote[n].active = false;
@@ -2347,6 +2451,9 @@ void JoinerSendJoin()
     w.Put<int>(g::clc_reliableSequence);
     const char* map = g::CvarString("mapname");  // el host contesta M_MAP si no es el suyo
     w.Put(map, (int)strlen(map) + 1);
+    char name[lobby::NAME];  // para la lista del lobby
+    MyName(name);
+    w.Put(name, (int)strlen(name) + 1);
     SendTo(S->host, w.buf, w.len);
     S->lastJoinTry = GetTickCount();
 }
@@ -2407,6 +2514,10 @@ void JoinerControl(uint8_t type, Reader r)
         g::Com_Printf("^1COOP: the host is full (4 players)\n");
         CoopStatus("The host already has 4 players.");
         S->role = NONE;
+        ClearLobbyUi();
+        break;
+    case lobby::M_LOBBY:
+        JoinerLobby(r);
         break;
     case M_MAP: {  // el host esta en otro mapa: cargarlo y volver a pedir lugar
         const char* map = MapName(r);
@@ -2529,6 +2640,8 @@ void JoinerLeave(const char* why)
     HookUsercmd(false);
     g_hostSeen = 0;
     memset(S->downed, 0, sizeof S->downed);
+    ClearLobbyUi();
+    Log("joiner: fuera (%s)", why);
     g::Com_Printf("^3COOP: %s\n", why);
     CoopStatus("%s", why);
     g::Cbuf_AddText("disconnect\n");
@@ -2593,6 +2706,11 @@ void SteamFrame()
     lastScan = GetTickCount();
     struct { char text[3][96], id[3][24]; } now = {};
     static decltype(now) prev = {{"-"}};
+    if (g_lobbyUi) {  // en un lobby la ventana muestra los jugadores en ese lugar; al salir se arma de nuevo
+        HideFriendButtons(1);
+        prev = {{"-"}};
+        return;
+    }
     int found = 0;
     steam::ForEachHost([&](uint64_t id) {
         if (found == 3) return;
@@ -2624,7 +2742,9 @@ void Cmd_CoopHost()
         CoopStatus("Could not open UDP port %d (is another program using it?)", port);
         return;
     }
+    if (S->role != HOST) g_lobby.Clear();
     S->role = HOST;
+    g_lobbyDirty = true;
     g::Com_Printf("^2COOP: hosting on port %d. Others: coopjoin <your ip>\n", port);
     CoopStatus("Hosting (UDP port %d). Now choose New Game or Load Game; others join with your IP%s.", port,
                steam::up ? " or through Steam" : "");
@@ -2692,12 +2812,16 @@ void Cmd_CoopLeave()
         for (int k = 0; k < 3; ++k) SendTo(S->host, w.buf, w.len);  // UDP: el host atiende el primero
         JoinerLeave("You left the co-op game.");
     } else if (S->role == HOST) {
+        for (int i = 0; i < g_lobby.n; ++i)  // los que esperan en el menu (a los de adentro les llega dos veces: nada)
+            for (int k = 0; k < 3; ++k) SendTo(g_lobby.e[i].addr, w.buf, w.len);
         for (int n = 1; n < g::MAX_CLIENTS; ++n) {
             if (!S->remote[n].active) continue;
             for (int k = 0; k < 3; ++k) SendTo(S->remote[n].addr, w.buf, w.len);
             if (PlayerInGame(n)) HostDropRemote(n);
             S->remote[n].active = false;
         }
+        g_lobby.Clear();
+        ClearLobbyUi();
         S->role = NONE;
         g_noPause = false;
         SkipUiPauseCheck(false);  // el menu vuelve a pausar como en el SP
@@ -3050,6 +3174,7 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
     PollCmdFile();
     StatsTick();
     SteamFrame();
+    if (S->role == HOST) HostLobbyTick();
     UiPausedFrame();
     if (S->sock == INVALID_SOCKET) {  // sin coop: los jugadores guardados de una partida coop se van enseguida
         if (sock == NS_SERVER) HostDropGhosts(0);
@@ -3062,6 +3187,12 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
     }
     if (!((S->role == HOST && sock == NS_SERVER) || (S->role == JOINER && sock == NS_CLIENT))) return 0;
     if (S->role == JOINER && !S->joined && GetTickCount() - S->lastJoinTry > 1000) JoinerSendJoin();
+    if (S->role == JOINER && !S->joined && g_lobbyUi && GetTickCount() - g_hostSeen > 10000) {
+        // en el lobby y el host no manda nada (se cerro o se corto): sin la lista vieja; se sigue intentando
+        ClearLobbyUi();
+        Log("lobby: el host no contesta");
+        CoopStatus("No answer from the host. Still trying to join...");
+    }
 
     static uint8_t buf[0x10000];
     for (;;) {
@@ -3087,6 +3218,7 @@ EXPORT int __cdecl Coop_GetPacket(int sock, msg_t* msg, netadr_t* from)
             Reader r{buf + 5, buf + n};
             if (S->role == HOST && buf[4] == M_JOIN) HostJoin(a, r);
             else if (S->role == HOST && buf[4] == M_BYE && FindSlot(a) > 0) HostDropRemote(FindSlot(a));
+            else if (S->role == HOST && buf[4] == M_BYE) g_lobby.Remove(a), g_lobbyDirty = true;  // se fue del lobby
             else if (S->role == JOINER) JoinerControl(buf[4], r);
             continue;
         }

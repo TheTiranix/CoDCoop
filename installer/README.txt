@@ -19,10 +19,11 @@ Install
 Call of Duty 2 (experimental)
 - Patch 1.2 or 1.3 (the Steam version is already 1.3), with co-op installed on every PC.
   Single player shows 1.2 even with patch 1.3, because 1.3 only changed multiplayer.
-- Main menu -> "Co-op". The host clicks "Host game" and then starts or loads a mission
-  as usual. The others click "Join <name>" (Steam friends, no ports to open) or type the
-  host's IP and click "Join" (UDP port 28962): their game loads the host's mission by
-  itself. In the console, coop2host and coop2join <IP> do the same.
+- Main menu -> "Co-op". The host clicks "Host game". The others click "Join <name>"
+  (Steam friends, no ports to open) or type the host's IP and click "Join" (UDP port
+  28962) and wait in the lobby: the Co-op window lists everyone. Then the host starts or
+  loads a mission as usual and the others load it by themselves (also if they join
+  later). In the console, coop2host and coop2join <IP> do the same.
 - Teammates see each other, shoot, ride the host's vehicles, show up on the compass and
   revive each other (get close and hold Use for 3 seconds).
 - The pause menu does not stop the game while teammates are connected. The Co-op window
@@ -30,8 +31,11 @@ Call of Duty 2 (experimental)
 
 Play
 1. Start Call of Duty as usual and open "Co-op" (main menu).
-2. The host clicks "Host game" and then picks New Game or Load Game.
-3. The others type the host's IP and click "Join".
+2. The host clicks "Host game".
+3. The others type the host's IP and click "Join" (or "Join <name>" with Steam) and wait
+   in the lobby: the Co-op window lists everyone who joined.
+4. The host picks New Game or Load Game: the others load the same mission by themselves.
+   Joining after the mission started also works.
 - In the same menu (also from the pause menu): "Friendly fire" Yes/No (the host
   decides) and "Disconnect" to leave the co-op game.
 

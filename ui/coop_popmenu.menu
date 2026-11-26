@@ -196,6 +196,8 @@
 			type ITEM_TYPE_TEXT
 			style 1
 			cvar "ui_coop_steam"
+			cvarTest "ui_coop_lobby"
+			hideCvar { "1" }
 			textalign ITEM_ALIGN_CENTER
 			textalignx 127
 			textaligny 12
@@ -272,6 +274,94 @@
 			action { play "mouse_click"; exec "coopjoinfriend 3"; }
 			mouseEnter { setitemcolor friend3 backcolor UI_BUTTON_BACK_COLOR_HOVER play "mouse_over" }
 			mouseExit { setitemcolor friend3 backcolor UI_BUTTON_BACK_COLOR }
+		}
+
+		// lobby: con ui_coop_lobby 1 (se creo partida o se esta unido) los jugadores van en lugar de los amigos de
+		// Steam; el mod pone ui_coop_player1..4 (ver ShowLobby en src/core.cpp)
+		itemDef
+		{
+			name lobbytitle
+			text "Players:"
+			rect 20 192 255 16
+			type ITEM_TYPE_TEXT
+			style 1
+			cvarTest "ui_coop_lobby"
+			showCvar { "1" }
+			textalign ITEM_ALIGN_CENTER
+			textalignx 127
+			textaligny 12
+			textscale .22
+			forecolor 1 1 1 .8
+			visible 1
+			decoration
+		}
+		itemDef
+		{
+			name player1
+			rect 20 210 255 18
+			type ITEM_TYPE_TEXT
+			style 1
+			cvar "ui_coop_player1"
+			cvarTest "ui_coop_lobby"
+			showCvar { "1" }
+			textalign ITEM_ALIGN_CENTER
+			textalignx 127
+			textaligny 14
+			textscale .28
+			forecolor 1 1 1 1
+			visible 1
+			decoration
+		}
+		itemDef
+		{
+			name player2
+			rect 20 228 255 18
+			type ITEM_TYPE_TEXT
+			style 1
+			cvar "ui_coop_player2"
+			cvarTest "ui_coop_lobby"
+			showCvar { "1" }
+			textalign ITEM_ALIGN_CENTER
+			textalignx 127
+			textaligny 14
+			textscale .28
+			forecolor 1 1 1 1
+			visible 1
+			decoration
+		}
+		itemDef
+		{
+			name player3
+			rect 20 246 255 18
+			type ITEM_TYPE_TEXT
+			style 1
+			cvar "ui_coop_player3"
+			cvarTest "ui_coop_lobby"
+			showCvar { "1" }
+			textalign ITEM_ALIGN_CENTER
+			textalignx 127
+			textaligny 14
+			textscale .28
+			forecolor 1 1 1 1
+			visible 1
+			decoration
+		}
+		itemDef
+		{
+			name player4
+			rect 20 264 255 18
+			type ITEM_TYPE_TEXT
+			style 1
+			cvar "ui_coop_player4"
+			cvarTest "ui_coop_lobby"
+			showCvar { "1" }
+			textalign ITEM_ALIGN_CENTER
+			textalignx 127
+			textaligny 14
+			textscale .28
+			forecolor 1 1 1 1
+			visible 1
+			decoration
 		}
 
 		// estado (lo escribe el mod en ui_coop_status)

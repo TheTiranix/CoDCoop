@@ -37,8 +37,11 @@ The installer copies `ddraw.dll`, `codcoop_core.dll`, `steam_api.dll`, `main\pak
 ## Play
 
 1. Start Call of Duty as usual and open **Co-op** in the main menu.
-2. **Host:** click **Host game** and then pick **New Game** or **Load Game**.
-3. **Everyone else:** click **Join <name>** (Steam friends) or type the host's IP and click **Join**.
+2. **Host:** click **Host game**.
+3. **Everyone else:** click **Join <name>** (Steam friends) or type the host's IP and click **Join**. You wait in the lobby: the Co-op window lists everyone who joined.
+4. **Host:** pick **New Game** or **Load Game**. The others load the same mission and come in by themselves.
+
+You can also join after the mission started: your game loads the host's mission and you come in.
 
 In the same menu (also during the game, from the pause menu):
 - **Friendly fire: Yes/No** is decided by the host.
@@ -72,8 +75,9 @@ In the same menu (also during the game, from the pause menu):
 The Call of Duty 2 campaign works the same way: the host runs the mission and up to 3 friends join it.
 
 1. Start Call of Duty 2 (single player) and open **Co-op** in the main menu.
-2. **Host:** click **Host game**, then start or load a mission as usual (New Game, Mission Select, Resume).
-3. **Everyone else:** click **Join <name>** (Steam friends) or type the host's IP and click **Join**. Your game loads the host's mission by itself.
+2. **Host:** click **Host game**.
+3. **Everyone else:** click **Join <name>** (Steam friends) or type the host's IP and click **Join**. You wait in the lobby, with everyone who joined listed in the Co-op window.
+4. **Host:** start or load a mission as usual (New Game, Mission Select, Resume). The others load it and come in by themselves, also if they join later.
 
 - **Steam:** same as in Call of Duty 1 (no ports to open; Steam shows "Playing Spacewar"). Friends can also join from the Steam friends list (right-click the host → **Join Game**).
 - **By IP:** connections use **UDP port 28962** (the host opens it on their router when playing over the internet, or uses a virtual network such as Radmin VPN or ZeroTier).

@@ -85,6 +85,8 @@
 			type		ITEM_TYPE_TEXT
 			style		0
 			dvar		"ui_coop2_steam"
+			dvarTest	"ui_coop2_lobby"
+			hideDvar	{ "1" }
 			textalign	ITEM_ALIGN_CENTER
 			textalignx	122
 			textaligny	11
@@ -152,6 +154,94 @@
 			visible		1
 			action { play "mouse_click"; exec "coop2joinsteam 3"; }
 			mouseEnter { play "mouse_over"; }
+		}
+
+		// lobby: con ui_coop2_lobby 1 (se creo partida o se esta unido) los jugadores van en lugar de los amigos de
+		// Steam; el mod pone ui_coop2_player1..4 (ver ShowLobby en src/cod2.cpp)
+		itemDef
+		{
+			name		lobbytitle
+			text		"Players:"
+			rect		15 74 245 14
+			type		ITEM_TYPE_TEXT
+			style		0
+			dvarTest	"ui_coop2_lobby"
+			showDvar	{ "1" }
+			textalign	ITEM_ALIGN_CENTER
+			textalignx	122
+			textaligny	11
+			textscale	.22
+			forecolor	1 1 1 .8
+			visible		1
+			decoration
+		}
+		itemDef
+		{
+			name		player1
+			rect		30 90 215 14
+			type		ITEM_TYPE_TEXT
+			style		0
+			dvar		"ui_coop2_player1"
+			dvarTest	"ui_coop2_lobby"
+			showDvar	{ "1" }
+			textalign	ITEM_ALIGN_CENTER
+			textalignx	107
+			textaligny	12
+			textscale	.27
+			forecolor	1 1 1 1
+			visible		1
+			decoration
+		}
+		itemDef
+		{
+			name		player2
+			rect		30 106 215 14
+			type		ITEM_TYPE_TEXT
+			style		0
+			dvar		"ui_coop2_player2"
+			dvarTest	"ui_coop2_lobby"
+			showDvar	{ "1" }
+			textalign	ITEM_ALIGN_CENTER
+			textalignx	107
+			textaligny	12
+			textscale	.27
+			forecolor	1 1 1 1
+			visible		1
+			decoration
+		}
+		itemDef
+		{
+			name		player3
+			rect		30 122 215 14
+			type		ITEM_TYPE_TEXT
+			style		0
+			dvar		"ui_coop2_player3"
+			dvarTest	"ui_coop2_lobby"
+			showDvar	{ "1" }
+			textalign	ITEM_ALIGN_CENTER
+			textalignx	107
+			textaligny	12
+			textscale	.27
+			forecolor	1 1 1 1
+			visible		1
+			decoration
+		}
+		itemDef
+		{
+			name		player4
+			rect		30 138 215 14
+			type		ITEM_TYPE_TEXT
+			style		0
+			dvar		"ui_coop2_player4"
+			dvarTest	"ui_coop2_lobby"
+			showDvar	{ "1" }
+			textalign	ITEM_ALIGN_CENTER
+			textalignx	107
+			textaligny	12
+			textscale	.27
+			forecolor	1 1 1 1
+			visible		1
+			decoration
 		}
 
 		// unirse: IP del anfitrion (dvar coop2_ip; coop2join sin argumento la usa)

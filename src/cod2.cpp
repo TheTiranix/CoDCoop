@@ -16,6 +16,7 @@
 #include "crashlog.h"
 #include "hook.h"
 #include "steam.h"
+#include "lobby.h"
 
 namespace {
 constexpr int MAX_CLIENTS = 4;
@@ -173,6 +174,8 @@ struct Remote {
     bool active;
     sockaddr_in addr;
 } g_remote[MAX_CLIENTS];
+lobby::List g_lobby;  // host: los que esperan en el menu y los que ya entraron, con su nombre (src/lobby.h)
+bool g_lobbyDirty;    // host: mandar la lista ya (alguien entro o se fue)
 DWORD g_joinedAt[MAX_CLIENTS];  // host: cuando entro cada remoto
 int g_squadRuns[MAX_CLIENTS];   // host: 1 si ya se corrio addPlayerToSquad sobre el remoto (HostSquads)
 DWORD g_lastHeard[MAX_CLIENTS];  // host: ultimo paquete de cada remoto
@@ -244,6 +247,105 @@ struct Packet {
 };
 
 bool SameAddr(const sockaddr_in& a, const sockaddr_in& b) { return a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port; }
+
+// ---------- lobby (src/lobby.h) ----------
+// El host atiende M_JOIN tambien en el menu: anota al que pide y le contesta con la lista (M_LOBBY). Cuando el host
+// ya tiene nivel, el reintento de M_JOIN de cada uno recibe M_REJOIN como siempre y entra solo.
+
+// nombre propio para M_JOIN y la lista: el de Steam; sin Steam vacio ("Host" / "Player N" en pantalla)
+void MyName(char out[lobby::NAME])
+{
+    char raw[64] = "";
+    if (steam::up) steam::Latin1(steam::Name(steam::MyId()), raw, sizeof raw);
+    lobby::CleanName(raw, out);
+}
+
+// M_JOIN = mapa + 0 + nombre + 0; el nombre puede faltar
+const char* JoinName(const uint8_t* body, int len)
+{
+    if (len <= 0 || body[len - 1]) return "";
+    const char* name = (const char*)body + strlen((const char*)body) + 1;
+    return name < (const char*)body + len ? name : "";
+}
+
+// ventana Co-op: ui_coop2_lobby 1 muestra ui_coop2_player1..4 en lugar de los amigos de Steam
+bool g_lobbyUi;
+char g_lobbyShown[lobby::MAX_PLAYERS][lobby::NAME];
+int g_lobbyShownCount, g_lobbySaid;
+void ShowLobby(const char (*names)[lobby::NAME], int count)
+{
+    bool same = g_lobbyUi && count == g_lobbyShownCount;
+    for (int i = 0; i < count && same; ++i) same = !strcmp(names[i], g_lobbyShown[i]);
+    if (same) return;
+    char cmd[512];
+    int at = snprintf(cmd, sizeof cmd, "set ui_coop2_lobby 1\n");
+    for (int i = 0; i < lobby::MAX_PLAYERS; ++i)
+        at += snprintf(cmd + at, sizeof cmd - at, "set ui_coop2_player%d \"%s\"\n", i + 1, i < count ? names[i] : "");
+    Cbuf_AddText(cmd);
+    memcpy(g_lobbyShown, names, count * sizeof names[0]);
+    g_lobbyShownCount = count;
+    g_lobbyUi = true;
+}
+void ClearLobbyUi()
+{
+    g_lobbySaid = 0;
+    if (!g_lobbyUi) return;
+    Cbuf_AddText("set ui_coop2_lobby 0\nset ui_coop2_player1 \"\"\nset ui_coop2_player2 \"\"\n"
+                 "set ui_coop2_player3 \"\"\nset ui_coop2_player4 \"\"\n");
+    g_lobbyUi = false;
+}
+
+// host en el menu: M_JOIN entra al lobby (lleno: M_FULL)
+void HostLobbyJoin(const sockaddr_in& from, const uint8_t* body, int len)
+{
+    if (!g_lobby.Touch(from, JoinName(body, len), GetTickCount())) {
+        Packet(M_FULL).Send(from);
+        return;
+    }
+    g_lobbyDirty = true;
+}
+
+// host, cada 1 s (o ya si cambio algo): vence a los que no dan noticias (5 s en el menu; 60 s con nivel, porque
+// mientras cargan la mision no mandan nada) y manda la lista a todos
+void HostLobbyTick()
+{
+    static DWORD last;
+    DWORD now = GetTickCount();
+    if (!g_lobbyDirty && now - last < 1000) return;
+    last = now;
+    g_lobbyDirty = false;
+    bool level = *LevelMap();
+    for (int n = 1; n < MAX_CLIENTS && level; ++n)  // en el menu un remoto "activo" es uno que quedo del nivel anterior
+        if (g_remote[n].active) g_lobby.Touch(g_remote[n].addr, nullptr, now);
+    g_lobby.Expire(now, level ? 60000 : 5000);
+    char names[lobby::MAX_PLAYERS][lobby::NAME], mine[lobby::NAME];
+    MyName(mine);
+    lobby::Display(mine, 0, names[0]);
+    for (int i = 0; i < g_lobby.n; ++i) lobby::Display(g_lobby.e[i].name, i + 1, names[i + 1]);
+    int count = 1 + g_lobby.n;
+    uint8_t body[1 + lobby::MAX_PLAYERS * lobby::NAME];
+    int len = lobby::Pack(body, sizeof body, names, count);
+    for (int i = 0; i < g_lobby.n && len > 0; ++i) {
+        Packet p(lobby::M_LOBBY);
+        p.Put(body, len);
+        p.Send(g_lobby.e[i].addr);
+    }
+    ShowLobby(names, count);
+    if (count != g_lobbySaid) Log("lobby: %d jugadores", count), g_lobbySaid = count;
+}
+
+// el que se une: la lista del host
+void JoinerLobby(const uint8_t* body, int len)
+{
+    char names[lobby::MAX_PLAYERS][lobby::NAME];
+    int count = lobby::Unpack(body, len, names);
+    if (count < 1) return;
+    ShowLobby(names, count);
+    if (count == g_lobbySaid) return;
+    g_lobbySaid = count;
+    Log("lobby: el host dice %d jugadores", count);
+    if (!g_joined && !g_mapLoadSince) Status("In the lobby (%d players). Waiting for the host to start a mission.", count);
+}
 
 // ---------- DObj y animaciones ----------
 // El juego arma el DObj de cada entidad (G_DObjUpdate 0x4d6110) en la tabla que dibuja el cliente: 0x74a980[entidad]
@@ -1056,6 +1158,8 @@ void SendRejoin(const sockaddr_in& to, bool now = false)
 
 void HostJoin(const sockaddr_in& from, const uint8_t* body, int len)
 {
+    if (!g_lobby.Touch(from, JoinName(body, len), GetTickCount())) Log("lobby: lista llena, %s:%d no se muestra",
+                                                                       inet_ntoa(from.sin_addr), ntohs(from.sin_port));
     int n = 0;
     for (int i = 1; i < MAX_CLIENTS && !n; ++i)
         if (g_remote[i].active && SameAddr(g_remote[i].addr, from)) n = i;
@@ -1363,6 +1467,8 @@ void DropRemote(int n, const char* why)
 {
     Log("host: jugador %d fuera (%s)", n + 1, why);
     g_remote[n].active = false;
+    g_lobby.Remove(g_remote[n].addr);
+    g_lobbyDirty = true;
     g_downed[n] = false;
     g_rideParent[n] = nullptr;
     if (*(int*)(GClient(n) + GC_CONNECTED) == 2) FreePlayerEntity(n);
@@ -1431,6 +1537,9 @@ void JoinerSendJoin()
     Packet p(M_JOIN);
     const char* map = LevelMap();
     p.Put(map, (int)strlen(map) + 1);
+    char name[lobby::NAME];  // para la lista del lobby
+    MyName(name);
+    p.Put(name, (int)strlen(name) + 1);
     p.Send(g_host);
     g_lastJoinTry = GetTickCount();
 }
@@ -1482,9 +1591,18 @@ void Poll()
             for (int n = 1; n < MAX_CLIENTS && !who; ++n)
                 if (g_remote[n].active && SameAddr(g_remote[n].addr, from)) who = n;
             if (who) g_lastHeard[who] = GetTickCount();
-            if (type == M_JOIN) HostJoin(from, body, bodyLen);
-            else if (type == M_CMD) HostUsercmd(from, body, bodyLen);
-            else if (type == M_BYE && who) DropRemote(who, "se fue");
+            // en el menu (sin nivel) solo lo del lobby: un remoto que quedo de un nivel anterior sigue mandando M_CMD,
+            // y atenderlo llamaria al servidor que ya se cerro
+            bool level = *LevelMap();
+            if (type == M_JOIN && level) HostJoin(from, body, bodyLen);
+            else if (type == M_JOIN) HostLobbyJoin(from, body, bodyLen);
+            else if (type == M_CMD && level) HostUsercmd(from, body, bodyLen);
+            else if (type == M_BYE && who && level) DropRemote(who, "se fue");
+            else if (type == M_BYE) {
+                if (who) g_remote[who].active = false;
+                g_lobby.Remove(from);
+                g_lobbyDirty = true;
+            }
         } else if (g_role == JOINER && SameAddr(from, g_host)) {
             g_hostHeard = GetTickCount();
             if (type == M_BYE) {
@@ -1519,9 +1637,12 @@ void Poll()
                 Log("joiner: el host cargo otra partida (%s), cargo el mapa y vuelvo a entrar", (const char*)body);
                 Status("Loading the host's mission (%s)...", (const char*)body);
                 Cbuf_AddText(cmd);
+            } else if (type == lobby::M_LOBBY) {
+                JoinerLobby(body, bodyLen);
             } else if (type == M_FULL) {
                 Status("The game is full (4 players).");
                 g_role = NONE;
+                ClearLobbyUi();
             } else if (type == M_SNAP && g_joined) {
                 JoinerSnapshot(body, bodyLen);
             } else if (type == M_DOBJ && g_joined) {
@@ -1539,6 +1660,7 @@ void Poll()
 void JoinerLost(const char* why)
 {
     Log("joiner: fuera (%s)", why);
+    ClearLobbyUi();
     bool inLevel = g_joined;
     g_role = NONE;
     g_joined = false;
@@ -1592,7 +1714,9 @@ void Cmd_Host()
         Com_Printf("^1COOP: could not open UDP port %d\n", PORT);
         return;
     }
+    if (g_role != HOST) g_lobby.Clear();
     g_role = HOST;
+    g_lobbyDirty = true;
     Log("host: esperando jugadores en el puerto %d", PORT);
     Status("Hosting on UDP port %d. Start or load a mission; the others join with your IP%s.", PORT,
            steam::up ? " or through Steam" : "");
@@ -1601,15 +1725,20 @@ void Cmd_Host()
 // coop2leave: el que se une se va de la partida; el host deja de crear partida (los demas vuelven al menu)
 void Cmd_Leave()
 {
+    Packet bye(M_BYE);  // 3 veces: UDP; el otro lado atiende el primero
     if (g_role == JOINER) {
-        Packet(M_BYE).Send(g_host);
+        for (int k = 0; k < 3; ++k) bye.Send(g_host);
         JoinerLost("Disconnected.");
     } else if (g_role == HOST) {
-        for (int n = 1; n < MAX_CLIENTS; ++n) {
+        for (int i = 0; i < g_lobby.n; ++i)  // los que esperan en el menu
+            for (int k = 0; k < 3; ++k) bye.Send(g_lobby.e[i].addr);
+        for (int n = 1; n < MAX_CLIENTS; ++n) {  // un M_BYE repetido al mismo no hace nada (ya no es JOINER)
             if (!g_remote[n].active) continue;
-            Packet(M_BYE).Send(g_remote[n].addr);
+            for (int k = 0; k < 3; ++k) bye.Send(g_remote[n].addr);
             DropRemote(n, "el host dejo de crear partida");
         }
+        g_lobby.Clear();
+        ClearLobbyUi();
         g_role = NONE;
         Log("host: deja de crear partida");
         Status("Stopped hosting. The game goes on single player.");
@@ -1717,7 +1846,8 @@ void SteamFrame()
     }
     uint64_t hosts[STEAM_BUTTONS] = {};
     int count = 0;
-    steam::ForEachHost([&](uint64_t id) { if (count < STEAM_BUTTONS) hosts[count++] = id; }, "codcoop2");
+    if (!g_lobbyUi)  // en un lobby la ventana muestra los jugadores en ese lugar
+        steam::ForEachHost([&](uint64_t id) { if (count < STEAM_BUTTONS) hosts[count++] = id; }, "codcoop2");
     static int shown = -1;
     if (count != shown) {
         Cbuf_AddText(count ? "set ui_coop2_steam \"Steam friends hosting a game:\"\n"
@@ -2013,6 +2143,7 @@ extern "C" void __cdecl Cod2_ComFrame()
     MenuPause();
     CompassFrame();
     SteamFrame();
+    if (g_role == HOST) HostLobbyTick();
     if (GetTickCount() - g_lastLevelFrame < 500) return;  // en un nivel atiende Cod2_Snapshot
     PollCommandFile();
     static DWORD lastPing;
@@ -2022,11 +2153,18 @@ extern "C" void __cdecl Cod2_ComFrame()
         if (ping)
             for (int n = 1; n < MAX_CLIENTS; ++n)
                 if (g_remote[n].active) Packet(M_PING).Send(g_remote[n].addr);
+        if (!*LevelMap()) Poll();  // en el menu: lobby (con nivel en pausa sigue sin atender, como antes)
         return;
     }
     if (g_role != JOINER) return;
     Poll();
     if (g_role != JOINER) return;
+    if (g_lobbyUi && !g_joined && !g_mapLoadSince && GetTickCount() - g_hostHeard > 10000) {
+        // en el lobby y el host no manda nada (se cerro o se corto): sin la lista vieja; se sigue intentando
+        ClearLobbyUi();
+        Log("lobby: el host no contesta");
+        Status("No answer from the host. Still trying to join...");
+    }
     if (g_joined && ping) Packet(M_PING).Send(g_host);  // esperando "clic para empezar"
     if (g_joined && GetTickCount() - g_hostHeard > HOST_TIMEOUT) {
         JoinerLost("Lost the connection to the host.");
