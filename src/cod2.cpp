@@ -890,34 +890,50 @@ uint8_t* TreeInfo(uint8_t* tree, int node, bool alloc)
     return *slot ? (uint8_t*)XANIM_INFOS + *slot * INFO_SIZE : nullptr;
 }
 
-void AnimateBody(int n, float dt)
+// Elige la animacion; el tiempo lo avanza el juego, como a la IA (0x476490 corre sobre estos arboles en cada frame del
+// servidor). Avanzarlo tambien aca lo hacia ir al doble y a saltos (hora anterior pisada), y el que se une recibia ese
+// estado roto: el cuerpo del host casi sin animacion.
+void AnimateBody(int n)
 {
     uint8_t* tree = g_bodyTree[n];
     uint8_t* xanim = *(uint8_t**)tree;
     int size = *(int*)(xanim + 4);
     int want = ChooseBodyAnim(n), leaf = g_animIndex[want];
-    if (leaf <= 0) return;
-    if (want != g_bodyAnim[n]) {  // todo apagado y la cadena hoja -> raiz con peso 1
-        for (int a = 0; a < size; ++a)
-            if (uint8_t* info = TreeInfo(tree, a, false)) *(float*)(info + 0x1c) = *(float*)(info + 0x20) = 0;
-        for (int node = leaf;; node = *(uint16_t*)(XAnimNode(xanim, node) + 2)) {
-            uint8_t* info = TreeInfo(tree, node, true);
-            if (info) *(float*)(info + 0x1c) = *(float*)(info + 0x20) = *(float*)(info + 0x24) = 1;
-            if (!node) break;
-        }
-        g_bodyAnim[n] = want;
+    if (leaf <= 0 || want == g_bodyAnim[n]) return;
+    for (int a = 0; a < size; ++a)  // todo apagado y la cadena hoja -> raiz con peso 1
+        if (uint8_t* info = TreeInfo(tree, a, false)) *(float*)(info + 0x1c) = *(float*)(info + 0x20) = 0;
+    for (int node = leaf;; node = *(uint16_t*)(XAnimNode(xanim, node) + 2)) {
+        uint8_t* info = TreeInfo(tree, node, true);
+        if (info) *(float*)(info + 0x1c) = *(float*)(info + 0x20) = *(float*)(info + 0x24) = 1;
+        if (!node) break;
     }
-    uint8_t* info = TreeInfo(tree, leaf, false);
-    float freq = *(float*)(XAnimLeafParts(xanim, leaf) + 8);
-    if (!info) return;
-    float& time = *(float*)(info + 0xc);
-    *(float*)(info + 0x10) = time;  // hora anterior
-    time += dt * freq;
-    if (time >= 1) time -= floorf(time);
+    g_bodyAnim[n] = want;
+}
+
+// El juego anima en cada frame del servidor cada entidad con DObj (bucle en 0x4dac71: XAnimUpdate 0x476490 con unos
+// 0,05 s, que avanza tambien los nodos de paso sincronizados), pero empieza en la entidad 1 (0x4dac7a): la 0 es el
+// jugador del SP, que no tiene modelo. En coop es el cuerpo del host y se anima aca con la misma funcion.
+// cdecl (arbol, 0, segundos, avisar notetracks). Sin avisar: los avisos van a una cola que el bucle del juego reparte
+// a la entidad que esta animando, y desde aca terminarian en otra
+constexpr uintptr_t XANIM_UPDATE = 0x476490;
+
+// XAnimUpdate deja el tiempo nuevo en info+0xc (vuelta +0x14) calculado desde el confirmado +0x10 (+0x16), y el juego lo
+// confirma despues, tambien desde la entidad 1; lo que se dibuja (0x4767b0, al procesar el snapshot) sale del
+// confirmado. Sin confirmar, el cuerpo del host quedaba en el primer paso: quieto para el que se une.
+void HostAnimateOwnBody()
+{
+    uint8_t* tree = g_bodyTree[0];
+    ((void(__cdecl*)(uint8_t*, int, float, int))XANIM_UPDATE)(tree, 0, 0.05f, 0);
+    int size = *(int*)(*(uint8_t**)tree + 4);
+    for (int a = 0; a < size; ++a)
+        if (uint8_t* info = TreeInfo(tree, a, false)) {
+            *(float*)(info + 0x10) = *(float*)(info + 0xc);
+            *(uint16_t*)(info + 0x16) = *(uint16_t*)(info + 0x14);
+        }
 }
 
 // host, cada frame antes de los snapshots
-void HostBodies(float dt)
+void HostBodies()
 {
     bool anyRemote = false;
     for (int n = 1; n < MAX_CLIENTS; ++n) anyRemote |= g_remote[n].active;
@@ -931,7 +947,9 @@ void HostBodies(float dt)
             continue;
         }
         if (!has || g_bodyWeapon[n] != *(int*)(GClient(n) + PS_WEAPON)) CreateBody(n);  // nuevo o cambio de arma
-        if (g_bodyTree[n]) AnimateBody(n, dt);
+        if (!g_bodyTree[n]) continue;
+        AnimateBody(n);
+        if (n == 0) HostAnimateOwnBody();
     }
 }
 
@@ -1974,7 +1992,7 @@ extern "C" int __cdecl Cod2_Snapshot()
         float dt = last ? (now - last) / 1000.0f : 0.05f;
         last = now;
         HostDowned(dt > 0.2f ? 0.2f : dt);
-        HostBodies(dt > 0.2f ? 0.2f : dt);
+        HostBodies();
         PlayersAsBodies(true);  // Cod2_AfterSnapshot lo deshace despues del snapshot local
         HostSendSnapshots();
         return 1;
