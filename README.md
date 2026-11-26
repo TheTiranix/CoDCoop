@@ -52,7 +52,8 @@ In the same menu (also during the game, from the pause menu):
 - Everyone needs Steam and the game running.
 - When the host starts a game, their Steam friends get a **Join <name>** button in the Co-op menu.
 - You can also use the Steam friends list: right-click the host → **Join Game** (with the game already running).
-- While the game is running, Steam shows "Playing Spacewar": that is expected, co-op uses that Steam test app (AppID 480) to connect.
+- If you start the game from Steam (Steam version), Steam shows you playing that game. If you start it outside Steam (CD or other versions), Steam shows "Playing Spacewar": that is expected, co-op uses that Steam test app (AppID 480) to connect.
+- Through Steam you only see and join friends who started the game the same way: everyone from Steam, or everyone outside Steam. If not, join by IP.
 
 ### Over the internet by IP
 
@@ -79,7 +80,7 @@ The Call of Duty 2 campaign works the same way: the host runs the mission and up
 3. **Everyone else:** click **Join <name>** (Steam friends) or type the host's IP and click **Join**. You wait in the lobby, with everyone who joined listed in the Co-op window.
 4. **Host:** start or load a mission as usual (New Game, Mission Select, Resume). The others load it and come in by themselves, also if they join later.
 
-- **Steam:** same as in Call of Duty 1 (no ports to open; Steam shows "Playing Spacewar"). Friends can also join from the Steam friends list (right-click the host → **Join Game**).
+- **Steam:** same as in Call of Duty 1 (no ports to open; everyone starts the game from Steam, or everyone outside Steam). Friends can also join from the Steam friends list (right-click the host → **Join Game**).
 - **By IP:** connections use **UDP port 28962** (the host opens it on their router when playing over the internet, or uses a virtual network such as Radmin VPN or ZeroTier).
 - Teammates see each other (standing, crouching, prone, with the weapon in hand), shoot, ride the host's vehicles, show up on the compass and revive each other.
 - The pause menu does not stop the game while teammates are connected. The **Co-op** window (also from the pause menu) has **Friendly fire** (the host decides) and **Disconnect**.

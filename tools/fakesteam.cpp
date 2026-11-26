@@ -3,6 +3,8 @@
 //   FAKESTEAM_ID   SteamID64 de este juego (por defecto 76561190000000000 + pid)
 //   FAKESTEAM_NAME nombre (por defecto Fake<pid>)
 //   FAKESTEAM_DROP 1 = los mensajes salen pero nunca llegan (simula una conexion P2P que no se arma)
+//   SteamAppId     la app (la pone Steam al abrir el juego, o el mod: 480). Como Steam, solo se ven y se mandan mensajes
+//                  los que estan en la misma app
 // Los mensajes van por UDP local; cada juego anota su puerto, nombre y rich presence en D:\CoDCoop\run\fakesteam\<id>.txt
 // (los "amigos" son los demas archivos con el proceso vivo). Como Steam: quien recibe de alguien nuevo ve el callback
 // 1251 (SteamNetworkingMessagesSessionRequest_t) y sus mensajes esperan hasta AcceptSessionWithUser; quien manda primero
@@ -48,6 +50,7 @@ static_assert(sizeof(Identity) == 136 && offsetof(Message, peer) == 12, "SteamNe
 const char* DIR = "D:\\CoDCoop\\run\\fakesteam";
 bool g_init, g_drop;
 uint64_t g_me;
+uint32_t g_app;
 char g_name[64];
 SOCKET g_sock = INVALID_SOCKET;
 int g_port;
@@ -86,7 +89,7 @@ void WriteMe()
     snprintf(path, sizeof path, "%s\\%llu.txt", DIR, g_me);
     FILE* f = fopen(path, "w");
     if (!f) return;
-    fprintf(f, "pid=%lu\nport=%d\nname=%s\n", GetCurrentProcessId(), g_port, g_name);
+    fprintf(f, "pid=%lu\nport=%d\nname=%s\napp=%u\n", GetCurrentProcessId(), g_port, g_name, g_app);
     for (auto& kv : g_presence) fprintf(f, "rp.%s=%s\n", kv.first.c_str(), kv.second.c_str());
     fclose(f);
 }
@@ -108,13 +111,14 @@ void ReadPeers()
         FILE* f = fopen(path, "r");
         if (!f) continue;
         Peer tmp{};
-        DWORD pid = 0;
+        DWORD pid = 0, app = 0;
         while (fgets(line, sizeof line, f)) {
             line[strcspn(line, "\r\n")] = 0;
             char* eq = strchr(line, '=');
             if (!eq) continue;
             *eq = 0;
             if (!strcmp(line, "pid")) pid = strtoul(eq + 1, nullptr, 10);
+            else if (!strcmp(line, "app")) app = strtoul(eq + 1, nullptr, 10);
             else if (!strcmp(line, "port")) tmp.port = atoi(eq + 1);
             else if (!strcmp(line, "name")) tmp.name = eq + 1;
             else if (!strncmp(line, "rp.", 3)) tmp.presence[line + 3] = eq + 1;
@@ -123,7 +127,7 @@ void ReadPeers()
         HANDLE p = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr;
         bool alive = p && WaitForSingleObject(p, 0) == WAIT_TIMEOUT;
         if (p) CloseHandle(p);
-        if (!alive) continue;
+        if (!alive || app != g_app) continue;  // otra app: ni rich presence ni conexion
         Peer& peer = g_peers[id];
         peer.port = tmp.port;
         peer.name = tmp.name;
@@ -170,6 +174,10 @@ API int SteamInternal_SteamAPI_Init(const char*, char* err)
     if (!GetEnvironmentVariableA("FAKESTEAM_NAME", g_name, sizeof g_name))
         snprintf(g_name, sizeof g_name, "Fake%lu", GetCurrentProcessId());
     g_drop = GetEnvironmentVariableA("FAKESTEAM_DROP", v, sizeof v) && v[0] == '1';
+    if (!GetEnvironmentVariableA("SteamAppId", v, sizeof v) || !(g_app = strtoul(v, nullptr, 10))) {
+        if (err) strcpy(err, "fakesteam: sin SteamAppId (el Steam real tampoco arranca sin app)");
+        return 1;
+    }
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
     g_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -302,7 +310,7 @@ API bool SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser(void*, const Id
 API void SteamAPI_SteamNetworkingMessage_t_Release(Message* m) { free(m); }
 
 API void* SteamAPI_SteamUtils_v010() { return &g_iface; }
-API uint32_t SteamAPI_ISteamUtils_GetAppID(void*) { return 480; }
+API uint32_t SteamAPI_ISteamUtils_GetAppID(void*) { return g_app; }
 API void* SteamAPI_SteamNetworkingUtils_SteamAPI_v004() { return &g_iface; }
 API void SteamAPI_ISteamNetworkingUtils_SetDebugOutputFunction(void*, int, void (*fn)(int, const char*)) { g_debug = fn; }
 API void SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess(void*) {}

@@ -45,8 +45,11 @@ Through Steam (no ports to open)
   in the Co-op menu.
 - You can also use the Steam friends list: right-click the host -> "Join Game"
   (with the game already running).
-- While the game is running, Steam shows "Playing Spacewar": that is expected, co-op
+- Started from Steam (Steam version), Steam shows you playing that game. Started outside
+  Steam (CD or other versions), Steam shows "Playing Spacewar": that is expected, co-op
   uses that Steam test app to connect.
+- Through Steam you only see and join friends who started the game the same way:
+  everyone from Steam, or everyone outside Steam. If not, join by IP.
 
 Over the internet by IP
 - The host has to open UDP port 28960 on their router (forwarded to their PC) and

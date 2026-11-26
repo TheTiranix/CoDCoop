@@ -1,5 +1,7 @@
 #pragma once
-// Steam (Spacewar, AppID 480) para unirse sin abrir puertos. steam_api.dll de 32 bits en la carpeta del juego,
+// Steam para unirse sin abrir puertos: con la app del juego si Steam lo abrio (version de Steam: se ve "jugando a Call
+// of Duty 2" y andan las invitaciones), si no Spacewar (AppID 480). Por Steam solo se ven y se conectan los que estan
+// en la misma app: los dos abiertos desde Steam o los dos por fuera. steam_api.dll de 32 bits en la carpeta del juego,
 // cargado a mano con las funciones planas (cdecl). Sin Steam abierto o sin el dll, Start() da false y el coop
 // sigue solo por IP. Las interfaces son las del steam_api.dll 8.33 que trae SteamVR (SDK con
 // SteamInternal_SteamAPI_Init, sin SteamAPI_Init exportada).
@@ -143,7 +145,8 @@ inline bool Start()
     for (auto& f : fns)
         if (!(*(FARPROC*)f.field = GetProcAddress(a.dll, f.name))) return strcpy(error, "steam_api.dll de otra version"), false;
     if (!a.user()) {
-        SetEnvironmentVariableA("SteamAppId", "480");  // Spacewar, sin steam_appid.txt
+        char app[16];  // Steam la pone al abrir el juego (CoD2 = 2630); por fuera, Spacewar y sin steam_appid.txt
+        if (!GetEnvironmentVariableA("SteamAppId", app, sizeof app)) SetEnvironmentVariableA("SteamAppId", "480");
         a.dispatchInit();
         char err[1024] = "";
         if (a.init("SteamUser023\0SteamFriends017\0SteamNetworkingMessages002\0", err) != 0)
@@ -161,7 +164,7 @@ inline bool Start()
         a.initRelay(net);
     }
     void* utils = a.utilsIf();
-    if (log) log("steam: app %u (480 = Spacewar)", utils ? a.appId(utils) : 0);
+    if (log) log("steam: app %u (480 = Spacewar, otra = abierto desde Steam)", utils ? a.appId(utils) : 0);
     return true;
 }
 
@@ -222,7 +225,7 @@ inline int Recv(uint8_t* buf, int size, uint64_t* from)
     return n;
 }
 
-// amigos con rich presence codcoop=host (Steam solo da la de amigos en la misma app, 480); CoD2 usa codcoop2
+// amigos con rich presence codcoop=host (Steam solo da la de amigos en la misma app); CoD2 usa codcoop2
 template <class F> void ForEachHost(F fn, const char* key = "codcoop")
 {
     if (!up) return;
