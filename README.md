@@ -47,7 +47,7 @@ In the same menu (also during the game, from the pause menu):
 - **Friendly fire: Yes/No** is decided by the host.
 - **Disconnect** leaves the co-op game: a player who joined goes back to the main menu; if the host clicks it, everyone else goes back to the menu and the host keeps playing alone.
 
-### Through Steam (no ports to open)
+### Through Steam (no ports to open)(experimental)
 
 - Everyone needs Steam and the game running.
 - When the host starts a game, their Steam friends get a **Join <name>** button in the Co-op menu.
